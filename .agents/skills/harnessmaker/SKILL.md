@@ -1,5 +1,5 @@
 ---
-name: dsh-plugin-authoring
+name: harnessmaker
 description: Use when creating, packaging, distributing, installing, debugging, or verifying DeepSeek Harness (dsh) plugins — bundle/profile structure, cordis.patch.yml layers, tarball vs git install pitfalls, web client settings whitelist, and runtime verification. 创建/打包/分发/安装/调试 DeepSeek Harness 插件，或验证插件安装与配置层时使用。
 whenToUse: 接到"开发/打包/安装/排查 dsh 插件"、"为什么插件装了不生效"、"settings-not-exposed"、"插件启动报 ERR_MODULE_NOT_FOUND" 等任务时。
 metadata:

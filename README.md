@@ -7,4 +7,4 @@
 | 目录 | 说明 |
 |---|---|
 | [`dsh-chat-background/`](dsh-chat-background/README.md) | 聊天背景插件：在 Web GUI 设置中选择本地图片作为聊天窗口背景。独立分发的 bundle，含预构建 `lib/` 和 `dsh.bundle` 补丁层，可通过 `dsh plugin add` 安装。 |
-| [`.agents/skills/dsh-plugin-authoring/`](.agents/skills/dsh-plugin-authoring/SKILL.md) | 插件开发 skill：完整开发/分发/安装/验证框架，含实测踩坑（tarball vs git/link 安装、Web 白名单 `settings-not-exposed`、运行时验证清单）。 |
+| [`.agents/skills/harnessmaker/`](.agents/skills/harnessmaker/SKILL.md) | 插件开发 skill：完整开发/分发/安装/验证框架，含实测踩坑（tarball vs git/link 安装、Web 白名单 `settings-not-exposed`、运行时验证清单）。 |
