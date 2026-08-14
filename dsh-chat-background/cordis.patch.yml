@@ -1,0 +1,5 @@
+# dsh-chat-background bundle patch: adds the chat-background settings section
+# and scrollport background presenter to the web composition.
+- insert:
+    - id: ui-chat-background
+      name: '@deepseek-ai/dsh-client-ui-chat-background'

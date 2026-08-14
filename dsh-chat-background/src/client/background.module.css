@@ -1,0 +1,9 @@
+/* Scrollport background seam: the chat column's stable scroll container
+   carries the feature-owned background-image variable. The attribute is the
+   documented conversation scrollport (ui-conversation README). */
+:global([data-conversation-scroll]) {
+  background-image: var(--dsw-chat-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
