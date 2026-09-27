@@ -399,6 +399,18 @@ await t("ctx.typert 缺失时 apply() 立刻报错（而不是静默 404）", ()
   const ctx = { effect: () => {} };
   assert.throws(() => apply(ctx), /ctx\.typert 不可用/);
 });
+// 又一个 404 根因：cordis 把模块的 default 导出当作插件本体。若 default 是
+// 服务类，cordis 就用它当插件、根本不调用 apply()，于是 MANIFEST 从未注册，
+// 客户端只看到裸 404。两个能用的插件都没有 default 导出。
+await t("没有 default 导出（cordis 会把 default 当插件本体）", async () => {
+  const mod = await import("../lib/index.js");
+  assert.ok(!("default" in mod), "不应有 default 导出");
+});
+await t("apply 是唯一的插件入口且为函数", async () => {
+  const mod = await import("../lib/index.js");
+  assert.equal(typeof mod.apply, "function", "apply 必须是函数");
+  assert.equal(typeof mod.name, "string", "name 必须是字符串");
+});
 
 try { fs.unlinkSync(tmpFile); } catch {}
 console.log(`\n${fail === 0 ? "全部通过" : "有失败"}：${pass} passed, ${fail} failed\n`);

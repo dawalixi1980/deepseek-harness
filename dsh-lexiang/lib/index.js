@@ -31,6 +31,27 @@
  */
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
+import { writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/*
+ * Import-time marker. Distinguishes three failure modes without a debugger:
+ *   no file         -> host half never imported (bundle resolution problem)
+ *   import.json     -> module loaded, but apply() never ran (cordis inject)
+ *   + boot.json     -> apply() ran
+ *   + registered    -> the manifest was handed to ctx.typert.register()
+ */
+try {
+  writeFileSync(
+    join(homedir(), ".dsh", "dsh-lexiang.import.json"),
+    `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid })}\n`,
+    "utf8",
+  );
+} catch {
+  /* diagnostics must never break the import */
+}
+
 import { LexiangClient, LexiangError, LX_ERR, DEFAULT_ENDPOINT } from "./lexiang-api.js";
 import {
   loadState,
@@ -553,15 +574,72 @@ export class LexiangService extends TypertRemoteService {
  * makes that mistake obvious at boot rather than as a confusing 404 in the UI.
  */
 export function apply(ctx) {
+  const diag = (name, payload) => {
+    try {
+      writeFileSync(
+        join(homedir(), ".dsh", `dsh-lexiang.${name}.json`),
+        `${JSON.stringify(payload, null, 2)}\n`,
+        "utf8",
+      );
+    } catch {
+      /* diagnostics must never break activation */
+    }
+  };
+
+  diag("boot", {
+    at: new Date().toISOString(),
+    pid: typeof process !== "undefined" ? process.pid : null,
+    hasTypert: Boolean(ctx && ctx.typert && typeof ctx.typert.register === "function"),
+    ctxKeys: ctx ? Object.keys(ctx).slice(0, 50) : [],
+  });
+
   const service = new LexiangService(ctx);
   if (!ctx || !ctx.typert || typeof ctx.typert.register !== "function") {
+    diag("error", { stage: "guard", message: "ctx.typert unavailable" });
     throw new Error(
       "dsh-lexiang: ctx.typert 不可用 —— 缺少 `export const inject = [\"typert\"]`，" +
         "远程方法将无法注册（客户端会收到 HTTP 404）",
     );
   }
-  ctx.effect(() => ctx.typert.register(MANIFEST), "dsh-lexiang: typert manifest");
+
+  ctx.effect(() => {
+    // Capture the real registration error. Without this the registry's
+    // validation failure is only logged and the UI just shows a bare 404.
+    let result;
+    try {
+      result = ctx.typert.register(MANIFEST);
+      diag("registered", {
+        at: new Date().toISOString(),
+        invocations: MANIFEST.invocations.length,
+        package: MANIFEST.package,
+        face: MANIFEST.face,
+      });
+    } catch (err) {
+      diag("error", {
+        at: new Date().toISOString(),
+        stage: "register",
+        name: err && err.name,
+        message: err && err.message ? err.message : String(err),
+        stack: err && err.stack ? String(err.stack).split("\n").slice(0, 8) : [],
+      });
+      throw err;
+    }
+    return result;
+  }, "dsh-lexiang: typert manifest");
   return service;
 }
 
-export { LexiangService as default };
+/*
+ * NO default export — deliberately.
+ *
+ * cordis treats a module's `default` export as the plugin itself. Exporting
+ * `LexiangService` as default made cordis try to use the class as the plugin
+ * instead of calling `apply(ctx)`, so `ctx.typert.register(MANIFEST)` never ran,
+ * the host registered no routes, and the client saw a bare
+ *   "transport failure for /api/lexiang/getSettings: HTTP 404"
+ * with no error surfaced anywhere.
+ *
+ * Both known-good plugins in this repo export only named bindings
+ * (dsh-skill-url: name/inject/apply; dsh-chat-background: apply + constants).
+ * Keep it that way.
+ */
