@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { LexiangService, MANIFEST } from "../lib/index.js";
+import { LexiangService, MANIFEST, apply } from "../lib/index.js";
 import { loadState, saveState, publicState, applyPatch, rememberSpace, maskToken, MAX_RECENT } from "../lib/store.js";
 import { LX_ERR } from "../lib/lexiang-api.js";
 
@@ -28,7 +28,10 @@ async function t(name, fn) {
 const tmpFile = path.join(os.tmpdir(), `dsh-lexiang-test-${process.pid}.json`);
 function freshService(fetchImpl) {
   try { fs.unlinkSync(tmpFile); } catch {}
-  return new LexiangService({ file: tmpFile, fetchImpl });
+  // NOTE the constructor signature: cordis passes the plugin context as the
+  // FIRST argument (`new LexiangService(ctx)`), so options come second.
+  // Passing options first is exactly the bug that broke activation in DSH.
+  return new LexiangService({}, { file: tmpFile, fetchImpl });
 }
 
 /** Reply helper: wrap a Lexiang envelope into an MCP tools/call result. */
@@ -309,26 +312,75 @@ console.log("\n=== MANIFEST 契约 ===");
 await t("invocations 与实现方法一一对应", () => {
   const svc = freshService();
   for (const inv of MANIFEST.invocations) {
-    assert.equal(typeof svc[inv], "function", `缺少实现: ${inv}`);
+    assert.equal(typeof svc[inv.method], "function", `缺少实现: ${inv.method}`);
   }
 });
-await t("每个 invocation 都有对应 schema", () => {
+await t("每个 invocation 都有 strict codec 且带 create()", () => {
+  assert.ok(Array.isArray(MANIFEST.invocations), "invocations 必须是数组");
   for (const inv of MANIFEST.invocations) {
-    assert.ok(MANIFEST.schemas[inv], `缺少 schema: ${inv}`);
+    assert.equal(inv.result.mode, "strict", `${inv.method} result 不是 strict`);
+    assert.equal(typeof inv.result.create, "function", `${inv.method} result 缺 create`);
+    const inst = inv.result.create();
+    assert.ok(inst && typeof inst.parse === "function", `${inv.method} create() 未返回可 parse 对象`);
+    for (const p of inv.parameters) {
+      assert.equal(typeof p.codec.create, "function", `${inv.method}.${p.name} 缺 create`);
+    }
   }
 });
-await t("所有 codec 都有 create 工厂（loader 强制要求）", () => {
-  for (const [k, v] of Object.entries(MANIFEST.schemas)) {
-    assert.equal(typeof v.create, "function", `${k} 缺少 create`);
-    assert.ok(v.create() && typeof v.create().parse === "function", `${k} 的 create() 需返回可 parse 的对象`);
+await t("descriptor id 与 namespace/method 一致", () => {
+  for (const inv of MANIFEST.invocations) {
+    assert.equal(inv.id, `dsh-lexiang#lexiang/${inv.method}`);
+    assert.equal(inv.service, "lexiang");
+    assert.equal(inv.namespace, "lexiang");
   }
 });
 await t("face 为 host 且不含保留方法名", () => {
   assert.equal(MANIFEST.face, "host");
-  const reserved = ["install", "installDirect", "installScoped", "remove", "has", "methods", "empty", "name", "namespace", "ctx", "constructor"];
+  const reserved = [
+    "assertMethodAvailable", "constructor", "empty", "has", "install", "installDirect",
+    "installScoped", "methods", "remove", "ctx", "invokeRemote", "name", "namespace",
+  ];
   for (const inv of MANIFEST.invocations) {
-    assert.ok(!reserved.includes(inv), `invocation 撞上保留名: ${inv}`);
+    assert.ok(!reserved.includes(inv.method), `invocation 撞上保留名: ${inv.method}`);
   }
+});
+await t("schemas 为空数组（本项目用 invocations 内联 codec）", () => {
+  assert.ok(Array.isArray(MANIFEST.schemas), "schemas 应为数组");
+});
+
+console.log("\n=== 激活契约（真实踩过的坑）===");
+await t("构造函数把第一个参数当 ctx，第二个参数才是 options", () => {
+  // cordis 用 `new LexiangService(ctx)` 构造。若构造函数把第一个参数解构成
+  // {file, fetchImpl}，就会得到 undefined file → 激活失败：
+  //   Error: cannot get property "file" without inject at new LexiangService
+  const ctx = { fake: "ctx" };
+  const svc = new LexiangService(ctx, { file: tmpFile });
+  assert.equal(svc.file, tmpFile, "options.file 应生效");
+  // 只传 ctx（模拟 DSH 的真实调用）时不得抛错，且回退到默认 state 路径。
+  const svc2 = new LexiangService(ctx);
+  assert.equal(typeof svc2.file, "string");
+  assert.ok(svc2.file.length > 0, "应回退到默认 state 文件路径");
+  assert.ok(svc2.file.includes("dsh-lexiang.json"), `默认路径不对: ${svc2.file}`);
+});
+await t("LexiangService 继承 TypertRemoteService（namespace 绑定）", () => {
+  const svc = new LexiangService({}, { file: tmpFile });
+  // TypertRemoteService 会把 namespace 挂到实例上；不继承时这里会缺失。
+  const hasNamespace =
+    svc.namespace === "lexiang" ||
+    (svc.constructor && svc.constructor.name === "LexiangService" && "namespace" in svc);
+  assert.ok(hasNamespace, "未继承 TypertRemoteService 或未绑定 namespace");
+});
+await t("apply() 只把 MANIFEST 传给 register（不传 service）", () => {
+  const registered = [];
+  const ctx = {
+    effect: (fn) => { try { fn(); } catch {} },
+    typert: { register: (...args) => { registered.push(args); } },
+  };
+  const svc = apply(ctx);
+  assert.equal(registered.length, 1, "register 应被调用一次");
+  assert.equal(registered[0].length, 1, "register 只应收到 MANIFEST 一个参数");
+  assert.equal(registered[0][0], MANIFEST);
+  assert.ok(svc instanceof LexiangService, "apply 应返回 service 实例");
 });
 
 try { fs.unlinkSync(tmpFile); } catch {}

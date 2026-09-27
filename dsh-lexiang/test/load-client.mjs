@@ -1,4 +1,4 @@
-﻿/*
+/*
  * dsh-lexiang — client bundle loader test.
  *
  * Faithfully re-implements the shell's module loader so this file is really
@@ -224,6 +224,23 @@ check("线名避开 RemoteNamespaceService 保留名", () => {
 check("METHODS 与 descriptors 数量一致", () => {
   if (loaded.METHODS.length !== loaded.CONTRIBUTION.descriptors.length) {
     throw new Error(`${loaded.METHODS.length} != ${loaded.CONTRIBUTION.descriptors.length}`);
+  }
+});
+// host/client 线名必须逐字一致，否则运行期报
+//   "transport failure for /api/lexiang/getSettings: HTTP 404"
+// （host 端没注册该方法，网关就找不到路由）
+check("client 线名与 host MANIFEST 完全一致", async () => {
+  const hostUrl = new URL("../lib/index.js", import.meta.url).href;
+  const host = await import(hostUrl);
+  const H = host.MANIFEST.invocations.map((i) => `${i.namespace}/${i.method}`).sort();
+  const C = loaded.CONTRIBUTION.descriptors.map((d) => `${d.namespace}/${d.method}`).sort();
+  const onlyHost = H.filter((x) => !C.includes(x));
+  const onlyClient = C.filter((x) => !H.includes(x));
+  if (onlyHost.length) throw new Error(`host 有而 client 没有: ${onlyHost.join(", ")}`);
+  if (onlyClient.length) throw new Error(`client 有而 host 没有: ${onlyClient.join(", ")}`);
+  if (H.length !== C.length) throw new Error(`数量不一致: host ${H.length} / client ${C.length}`);
+  if (host.MANIFEST.package !== loaded.CONTRIBUTION.package) {
+    throw new Error(`package 名不一致: ${host.MANIFEST.package} / ${loaded.CONTRIBUTION.package}`);
   }
 });
 

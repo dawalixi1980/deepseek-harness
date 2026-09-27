@@ -117,6 +117,58 @@ client (浏览器)                host (进程内 ESM)            乐享
 | 6 | host/client 版本错位 → 404 | 改名后**真正重启** DSH |
 | 7 | `jsx()` 第三参数是 key，不是 children | 文字一律写 `children:`，测试含**空胶囊回归** |
 
+### 本插件自己踩到的 2 个新坑（已修复并有回归测试）
+
+**坑 8：host 服务类必须 `extends TypertRemoteService`，且构造函数第一个参数是 `ctx`**
+
+首次安装后 GUI 报：
+
+```
+启用失败：dsh: warning: 1 entry did not activate lexiang (dsh-lexiang):
+Error: cannot get property "file" without inject at new LexiangService
+```
+
+**原因**：我最初把服务写成了普通类 `constructor({file, fetchImpl} = {})`。但 **cordis 是用 `new LexiangService(ctx)` 构造的** —— 第一个参数是插件上下文，不是配置对象。于是 `{file}` 解构出 `undefined`，赋值时报错，整个 bundle 激活失败。
+
+**同时还错了一处**：`apply()` 里写成 `ctx.typert.register(MANIFEST, service)`。**`register` 只接受 MANIFEST 一个参数**，服务由 cordis 按类构造，不该手动传。
+
+**正确写法**（照抄 `dsh-skill-url`，它是验证过能激活的）：
+
+```js
+export class LexiangService extends TypertRemoteService {
+  constructor(ctx, options = {}) {   // ← ctx 在前
+    super(ctx, "lexiang");           // ← 绑定 namespace
+    this.file = options.file || STATE_FILE;
+  }
+}
+
+export function apply(ctx) {
+  const service = new LexiangService(ctx);
+  ctx.effect(() => ctx.typert.register(MANIFEST), "dsh-lexiang: typert manifest");
+  return service;
+}
+```
+
+> 离线测试跑在 DSH 之外，解析不到 `@deepseek-ai/dsh-typert-protocol`，所以用
+> `await import()` + try/catch 兜底：DSH 里拿到真类，测试里退化成最小替身。
+> 这也让「构造函数签名」这件事能在测试里被断言（见 `test/host.test.mjs` 的「激活契约」一节）。
+
+**坑 9：host/client 线名必须逐字一致，否则 404**
+
+修好坑 8 后，面板报：
+
+```
+初始化失败：gateway/internal: client api: lexiang/getSettings failed:
+transport failure for /api/lexiang/getSettings: HTTP 404
+```
+
+**原因**：client 侧 bundle 是**每次请求从磁盘现读**的，host 侧却是**进程启动时 import 一次**。
+改了 host 的线名却没重启 → client 请求的新方法在 host 里根本不存在 → 网关找不到路由 → 404。
+
+**两个层面**：
+1. **操作层面**：改 host 代码后**必须真正重启 DSH**（桌面版点 X 只是缩进托盘，进程不死）。
+2. **代码层面**：两侧线名写错不会在编译期报错。所以加了一条测试：把 host `MANIFEST.invocations` 与 client `CONTRIBUTION.descriptors` 的 `namespace/method` **全量对比，多一个少一个都失败**。
+
 ## 测试
 
 ```bash

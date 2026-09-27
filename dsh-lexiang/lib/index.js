@@ -17,6 +17,24 @@
  * so each user supplies their own COMPANY_FROM + token through the UI.
  */
 
+/*
+ * `@deepseek-ai/dsh-typert-protocol` is resolved by DSH's own loader at runtime
+ * (it lives inside the app bundle), so it is imported dynamically: that keeps
+ * the module importable by the offline tests, which run outside DSH and cannot
+ * resolve the package. A minimal stand-in is used when it is unavailable.
+ */
+let TypertRemoteService;
+try {
+  ({ TypertRemoteService } = await import("@deepseek-ai/dsh-typert-protocol"));
+} catch {
+  TypertRemoteService = class {
+    constructor(ctx, namespace) {
+      this.ctx = ctx;
+      this.namespace = namespace;
+    }
+  };
+}
+
 import { LexiangClient, LexiangError, LX_ERR, DEFAULT_ENDPOINT } from "./lexiang-api.js";
 import {
   loadState,
@@ -41,61 +59,88 @@ const fail = (err) => ({
 });
 
 /** Typert strict codec: the loader requires a `create` factory. */
-const codec = (typeSymbol, schema) => ({ mode: "strict", typeSymbol, create: () => schema });
+const codec = (typeSymbol) => ({ mode: "strict", typeSymbol, create: () => anyObject });
 
 /** Minimal permissive schema — the panel validates before sending. */
-const anyObject = { parse: (v) => (v && typeof v === "object" ? v : {}), safeParse: (v) => ({ success: true, data: v }) };
+const anyObject = {
+  parse: (v) => (v && typeof v === "object" ? v : {}),
+  safeParse: (v) => ({ success: true, data: v }),
+};
+
+/**
+ * One invocation per remote method. Each takes a single optional JSON object
+ * named `args` (the panel always sends `{...}`), which keeps the descriptor
+ * list uniform while staying inside the strict-codec contract.
+ */
+function invocation(method) {
+  return {
+    id: `dsh-lexiang#lexiang/${method}`,
+    service: "lexiang",
+    namespace: "lexiang",
+    method,
+    invocation: { kind: "direct" },
+    parameters: [
+      {
+        name: "args",
+        wire: "args",
+        source: "json",
+        acceptsUndefined: true,
+        codec: codec(`dsh-lexiang#${method}Args`),
+      },
+    ],
+    result: codec(`dsh-lexiang#${method}Result`),
+  };
+}
+
+export const METHODS = [
+  "getSettings",
+  "saveSettings",
+  "clearSettings",
+  "testConnection",
+  "listTeams",
+  "listSpaces",
+  "describeSpace",
+  "listChildren",
+  "readEntry",
+  "search",
+  "createEntry",
+  "renameEntry",
+  "moveEntry",
+  "removeEntry",
+  "uploadFile",
+];
 
 export const MANIFEST = {
   package: "dsh-lexiang",
   face: "host",
-  // Schema keys mirror the invocation names: the loader looks up the codec by
-  // the remote method name, so a mismatch fails registration at boot.
-  schemas: {
-    getSettings: codec("dsh-lexiang/getSettings", anyObject),
-    saveSettings: codec("dsh-lexiang/saveSettings", anyObject),
-    clearSettings: codec("dsh-lexiang/clearSettings", anyObject),
-    testConnection: codec("dsh-lexiang/testConnection", anyObject),
-    listTeams: codec("dsh-lexiang/listTeams", anyObject),
-    listSpaces: codec("dsh-lexiang/listSpaces", anyObject),
-    describeSpace: codec("dsh-lexiang/describeSpace", anyObject),
-    listChildren: codec("dsh-lexiang/listChildren", anyObject),
-    readEntry: codec("dsh-lexiang/readEntry", anyObject),
-    search: codec("dsh-lexiang/search", anyObject),
-    createEntry: codec("dsh-lexiang/createEntry", anyObject),
-    renameEntry: codec("dsh-lexiang/renameEntry", anyObject),
-    moveEntry: codec("dsh-lexiang/moveEntry", anyObject),
-    removeEntry: codec("dsh-lexiang/removeEntry", anyObject),
-    uploadFile: codec("dsh-lexiang/uploadFile", anyObject),
-  },
-  invocations: [
-    "getSettings",
-    "saveSettings",
-    "clearSettings",
-    "testConnection",
-    "listTeams",
-    "listSpaces",
-    "describeSpace",
-    "listChildren",
-    "readEntry",
-    "search",
-    "createEntry",
-    "renameEntry",
-    "moveEntry",
-    "removeEntry",
-    "uploadFile",
-  ],
+  schemas: [],
+  invocations: METHODS.map(invocation),
   model: {},
 };
 
 /**
- * The runtime object the client face talks to. One instance per host process;
- * it re-reads the state file on every mutation so external edits are honoured.
+ * The runtime service the client face talks to.
+ *
+ * MUST extend TypertRemoteService and call `super(ctx, namespace)`:
+ * cordis constructs plugin classes with the context as the FIRST argument
+ * (`new LexiangService(ctx)`), so a plain class that destructures its first
+ * argument as a config object blows up with
+ *   "Cannot get property \"file\" without inject at new LexiangService"
+ * and the whole bundle fails to activate (GUI: 「1 entry did not activate」).
+ *
+ * Incident record: this class was originally a plain class with
+ * `constructor({file, fetchImpl} = {})` and `apply()` called
+ * `ctx.typert.register(MANIFEST, service)`. Two mistakes at once — the second
+ * argument is not how the service is bound (register takes MANIFEST only), and
+ * the constructor must accept ctx. Fixed by mirroring dsh-skill-url, which is
+ * known to activate.
  */
-export class LexiangService {
-  constructor({ file = STATE_FILE, fetchImpl } = {}) {
-    this.file = file;
-    this.fetchImpl = fetchImpl;
+export class LexiangService extends TypertRemoteService {
+  constructor(ctx, options = {}) {
+    super(ctx, "lexiang");
+    // Options are only used by the offline tests; in DSH they are absent.
+    this.file = options.file || STATE_FILE;
+    this.fetchImpl = options.fetchImpl;
     this._client = null;
     this._clientKey = "";
   }
@@ -484,19 +529,12 @@ export class LexiangService {
 }
 
 /**
- * Cordis plugin entry. The host half is imported once at boot, so this only
- * needs to publish the remote service.
+ * Cordis plugin entry. `register(MANIFEST)` takes the manifest ONLY — the
+ * service is constructed by cordis from this class, not passed in.
  */
 export function apply(ctx) {
-  const service = new LexiangService({});
-  if (ctx && ctx.typert && typeof ctx.typert.register === "function") {
-    ctx.typert.register(MANIFEST, service);
-  }
-  if (ctx && typeof ctx.on === "function") {
-    ctx.on("dispose", () => {
-      service._client = null;
-    });
-  }
+  const service = new LexiangService(ctx);
+  ctx.effect(() => ctx.typert.register(MANIFEST), "dsh-lexiang: typert manifest");
   return service;
 }
 
