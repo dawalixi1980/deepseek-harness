@@ -1,0 +1,49 @@
+{
+  "name": "dsh-lexiang",
+  "version": "0.1.0",
+  "description": "Lexiang (乐享) knowledge-base panel for DeepSeek Harness: browse spaces and the entry tree, read pages, search with keyword/semantic modes, upload files, create/edit/delete entries — using your own COMPANY_FROM + token entered in the UI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dawalixi1980/deepseek-harness.git",
+    "directory": "dsh-lexiang"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "test",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/validate-typert-contract.mjs && node test/load-client.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "lexiang",
+    "knowledge-base"
+  ],
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-api-gateway"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

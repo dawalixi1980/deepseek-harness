@@ -1,0 +1,5 @@
+# Bundle layer contributed by dsh-lexiang.
+# Installed automatically when a profile lists this bundle.
+- insert:
+    - id: lexiang
+      name: dsh-lexiang
