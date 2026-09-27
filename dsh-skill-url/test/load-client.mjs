@@ -28,12 +28,19 @@ function record(ok, label, detail) {
 }
 function check(label, fn) {
   try {
-    fn();
+    const out = fn();
+    // 允许 async 断言：把 promise 的失败也计入结果，而不是静默通过
+    if (out !== null && typeof out === 'object' && typeof out.then === 'function') {
+      pendingChecks.push(out.then(() => record(true, label), (err) => record(false, label, err?.message ?? String(err))));
+      return;
+    }
     record(true, label);
   } catch (err) {
     record(false, label, err?.message ?? String(err));
   }
 }
+/** async 断言的收尾队列（在汇总前 await）。 */
+const pendingChecks = [];
 
 console.log('bundle: ' + bundlePath);
 
@@ -84,21 +91,58 @@ console.log('\n[2] factory 构造与导出（TDZ 在此暴露）');
 
 /** 可预置初值的 fake hooks：单次渲染即可驱动任意分支。
  *  runEffects=true 时**真正执行** useEffect 回调，等价于真实挂载
- *  —— 组件挂在 effect 里的取数逻辑（如 face.listInstalled()）才会暴露错误。 */
+ *  —— 组件挂在 effect 里的取数逻辑（如 face.listInstalled()）才会暴露错误。
+ *
+ *  keepState=true 时 useState 的 setter 会**真的写回**状态，因此连续渲染两次
+ *  就能看到 effect 里异步取回的数据（模拟真实 React 的重渲染）。 */
 function makeReact(seed = [], options = {}) {
+  // 每次渲染都是新的一轮：hook 游标归零，状态按「hook 序号」存，
+  // 这样才能像真实 React 那样在多次渲染间保持状态。
+  const store = [];
   let cursor = 0;
   const next = (fallback) => (cursor < seed.length ? seed[cursor++] : fallback);
-  return {
-    useState: (init) => [next(init), () => {}],
+  const api = {
+    useState: (init) => {
+      const at = cursor++;
+      if (store[at] === undefined) store[at] = at < seed.length ? seed[at] : init;
+      const setter = (value) => {
+        store[at] = typeof value === 'function' ? value(store[at]) : value;
+      };
+      return [store[at], setter];
+    },
     useCallback: (fn) => fn,
     useEffect: (fn) => { if (options.runEffects === true) fn(); },
     useMemo: (fn) => fn(),
     createElement: (type, props, ...kids) => ({ type, props, children: kids }),
+    /** 开始新一次渲染：hook 游标归零（状态仍按 hook 序号保留）。 */
+    __beginRender: () => { cursor = 0; },
   };
+  return api;
 }
 
+/** 用同一实例连续渲染组件（模拟真实 React 的重渲染，状态跨渲染保留）。 */
+function renderWith(reactApi, Component, props) {
+  if (typeof reactApi?.__beginRender === 'function') reactApi.__beginRender();
+  return Component(props);
+}
+
+/**
+ * 忠实还原 react/jsx-runtime 的调用约定：jsx(type, props, key)，
+ * **第三个参数是 key，不是 children**。
+ *
+ * 事故记录（坑 7）：曾经把文字写成 `jsx("button", {...}, "文字")`，
+ * 于是文字被当成 key 吞掉，渲染出一个**空胶囊**（数据完好、只是不显示）。
+ * 早期的假 jsx 忽略第三个参数、children 又取自 props.children，恰好"帮忙掩盖"
+ * 了这个错误，所以这里必须让假 runtime 与真实行为一致：把第三个参数当 key，
+ * 且**不接受**第三个参数作为子节点。
+ */
 function makeJsxRuntime() {
-  const jsx = (type, props) => ({ type, props: props ?? {}, children: (props ?? {}).children });
+  const jsx = (type, props, key) => ({
+    type,
+    key: key === undefined ? (props ?? {}).key : key,
+    props: props ?? {},
+    children: (props ?? {}).children,
+  });
   return { jsx, jsxs: jsx, Fragment: Symbol.for('react.fragment') };
 }
 
@@ -257,6 +301,36 @@ check('注入缺失时渲染出错误提示（不白屏、不抛错）', () => {
   if (!text.includes('skillUrl 服务不可用')) throw new Error('未出现诊断提示：' + text.slice(0, 120));
 });
 
+/**
+ * 坑 7 回归：已保存的仓库网址必须**显示出文字**。
+ * 挂载 effect 会异步拉 recentUrls；这里用同一个 react 实例渲染两次，
+ * 中间的微任务让 promise 落定，第二次渲染就能看到 chip。
+ */
+check('已保存的网址 chip 显示出 label 文字（坑 7 回归）', async () => {
+  const saved = [{ url: 'https://github.com/dawalixi1980/Dawalixi-skill', label: 'dawalixi1980/Dawalixi-skill', at: 1 }];
+  let reactApi;
+  const seeded = captured.factory((spec) => {
+    if (spec === 'react') { reactApi = makeReact(seeds, { runEffects: true }); return reactApi; }
+    if (spec === 'react/jsx-runtime') return makeJsxRuntime();
+    throw new Error('意料之外的 require：' + spec);
+  });
+  const api = {
+    ...faceApi,
+    recentUrls: async () => ({ sites: saved }),
+    rememberUrl: async () => ({ sites: saved }),
+    forgetUrl: async () => ({ sites: [] }),
+  };
+  renderWith(reactApi, seeded.SkillUrlSection, { ...api, t: (key) => key });   // 首次渲染 + effect 发起取数
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const rendered = renderWith(reactApi, seeded.SkillUrlSection, { ...api, t: (key) => key });   // 重渲染
+  const text = collectText(rendered, []).join(' | ');
+  if (!text.includes('dawalixi1980/Dawalixi-skill')) {
+    throw new Error('chip 没有显示出 label（很可能又把文字当成了 jsx 的第三个参数/key）：' + text.slice(0, 200));
+  }
+});
+
 let tree;
 check('组件可渲染（含已发现技能列表）', () => {
   const section = mod.SkillUrlSection;
@@ -296,6 +370,9 @@ if (tree !== undefined && tree !== null) {
 }
 
 // ── 汇总 ─────────────────────────────────────────────────────────────────
+// 先等所有 async 断言（如「chip 显示 label」）落定，再判定结果。
+await Promise.allSettled(pendingChecks);
+
 console.log('');
 if (failures.length === 0) {
   console.log('全部通过。client bundle 可以安全安装。');

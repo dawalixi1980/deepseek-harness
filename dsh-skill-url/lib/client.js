@@ -432,6 +432,11 @@ window.__ModuleLoader__.load({
 				] }),
 
 				// 已保存的仓库网址：点文本填入输入框，点 × 移除
+				//
+				// ⚠️ 坑 7：react/jsx-runtime 的 jsx(type, props, key) **第三个参数是 key**，
+				// 不是 children。曾写成 `jsx("button", {...}, site.label)`，于是标签文字
+				// 被当成 key 吞掉，渲染出一个**空胶囊**（数据是好的，只是没显示）。
+				// 文本必须写成 props.children。
 				jsx("div", { className: c.savedRow, children: [
 					jsx("span", { className: c.savedLabel, children: t("savedTitle") + "：" }),
 					sites.length === 0
@@ -441,14 +446,16 @@ window.__ModuleLoader__.load({
 								type: "button",
 								className: c.chipText,
 								title: site.url + "  —— " + t("useIt"),
-								onClick: () => { setUrl(site.url); setError(""); setNotice(""); }
-							}, site.label),
+								onClick: () => { setUrl(site.url); setError(""); setNotice(""); },
+								children: site.label.length > 0 ? site.label : site.url
+							}),
 							jsx("button", {
 								type: "button",
 								className: c.chipDel,
 								title: t("remove"),
-								onClick: () => forgetSite(site.url)
-							}, "×")
+								onClick: () => forgetSite(site.url),
+								children: "×"
+							})
 						] })),
 					url.trim().length > 0 && !sites.some((site) => site.url === url.trim())
 						? jsx("button", { className: c.btn, style: { height: "24px", padding: "0 10px", fontSize: "12px" }, onClick: () => saveSite(url), children: t("save") })
