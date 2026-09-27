@@ -18,22 +18,18 @@
  */
 
 /*
- * `@deepseek-ai/dsh-typert-protocol` is resolved by DSH's own loader at runtime
- * (it lives inside the app bundle), so it is imported dynamically: that keeps
- * the module importable by the offline tests, which run outside DSH and cannot
- * resolve the package. A minimal stand-in is used when it is unavailable.
+ * STATIC import — deliberately identical to dsh-skill-url, which is known to
+ * activate. It was previously a dynamic `await import()` with a silent
+ * fallback class; that was a mistake: if the dynamic import fails inside DSH's
+ * loader, the plugin would silently degrade to the stub base class, typert
+ * registration would not take effect, and every client call would 404 with no
+ * error anywhere. Never swallow this import.
+ *
+ * DSH resolves `@deepseek-ai/*` from inside its own bundle. The offline tests
+ * run outside DSH, so `test/register-stub.mjs` installs a resolve hook that maps
+ * this specifier to a local stub (see package.json "test").
  */
-let TypertRemoteService;
-try {
-  ({ TypertRemoteService } = await import("@deepseek-ai/dsh-typert-protocol"));
-} catch {
-  TypertRemoteService = class {
-    constructor(ctx, namespace) {
-      this.ctx = ctx;
-      this.namespace = namespace;
-    }
-  };
-}
+import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
 import { LexiangClient, LexiangError, LX_ERR, DEFAULT_ENDPOINT } from "./lexiang-api.js";
 import {
