@@ -100,7 +100,7 @@ https://github.com/anthropics/skills
 
 ## 三、开发过程中踩的全部坑（重点）
 
-这个插件从"装上就报错"到"能用"，一共踩了 **6 个**独立的坑。前 5 个都是 **DSH 插件 API 契约**问题（不是插件逻辑问题），第 6 个是环境/加载机制问题。**写 DSH 插件的人建议全部读一遍**——每一条都能让你的插件白屏或激活失败。
+这个插件从"装上就报错"到"能用"，一共踩了 **7 个**独立的坑。前 5 个都是 **DSH 插件 API 契约**问题，第 6 个是加载机制问题，第 7 个是 JSX 调用约定问题——**全都不是插件业务逻辑的问题**。**写 DSH 插件的人建议全部读一遍**——每一条都能让你的插件白屏或激活失败。
 
 ### 坑 1：ESM 暂时性死区（TDZ）→ 整个 Web 端起不来
 
@@ -221,6 +221,29 @@ skillUrl/installSkill failed: transport failure for /api/skillUrl/installSkill: 
 
 **修**：重启 DSH。**桌面版点 X 只是缩进托盘、进程不死**——必须"托盘右键 → 退出"或任务管理器结束 `DeepSeek Harness` 进程。
 
+### 坑 7：`jsx()` 的第三个参数是 **key**，不是 children → 渲染出空元素
+
+**症状**：功能、数据全部正常（host 里 `label` 存得好好的），但界面上一行 **「已保存的仓库网址：」后面只有一个空胶囊**——标签文字不见了。
+
+**原因**：`react/jsx-runtime` 的签名是
+
+```js
+jsx(type, props, key)        // ← 第三个参数是 key
+```
+
+曾经把文字当成第三个参数传：
+
+```js
+// ❌ 文字被当作 key 吞掉，button 没有任何子节点 → 空胶囊
+jsx("button", { className: c.chipText, onClick: ... }, site.label)
+// ✅ 文字必须写在 props.children
+jsx("button", { className: c.chipText, onClick: ..., children: site.label })
+```
+
+这个错误**很容易漏测**：如果假 jsx runtime 写成 `(type, props) => ({...})`（忽略第三个参数）、子节点又取自 `props.children`，那它就恰好"帮忙掩盖"了这个 bug —— 这正是本包测试早期版本踩的坑，所以 `test/load-client.mjs` 里的假 runtime 现在**忠实还原真实约定**（第三个参数当 key，绝不当作子节点），并新增断言：chip 必须真的渲染出 label 文字。
+
+**修**：把文本写进 `props.children`（本包同一文件里其它地方本来就是这么写的，只有这两处写错了）。
+
 ---
 
 ## 四、排障速查
@@ -229,7 +252,8 @@ skillUrl/installSkill failed: transport failure for /api/skillUrl/installSkill: 
 |---|---|---|
 | 应用报「无法启动或已意外停止 / 1 entry did not activate」 | host 或 client 半加载期抛错 | 跑两个测试；启动对话框里点「禁用第三方插件、备份 profile patch 并重启」自救 |
 | 设置里点「从网址装技能」**一片空白** | 组件抛错（坑 3 / 4） | 刷新页面；仍白屏说明还是旧 bundle → 重启 DSH |
-| 面板有内容但一行**红字** | 已修版在跑，具体原因看红字 | 按红字内容对照上面 6 个坑 |
+| 面板有内容但一行**红字** | 已修版在跑，具体原因看红字 | 按红字内容对照上面 7 个坑 |
+| **某一行只有空元素/空胶囊，文字不见了** | 文字被当成了 `jsx` 的第三个参数（坑 7） | 把文字移到 `props.children` |
 | 点「安装」报 **404** | host 进程没重启（坑 6） | 托盘右键退出 → 重开 |
 | 报 `conflicts with its namespace service` | 端点名撞了（坑 5） | 换线名（避开禁用名单） |
 | 报 `strict codec has no create() factory` | codec 形状过期（坑 2） | 用 `create: () => schema` |
@@ -266,7 +290,7 @@ node test/validate-typert-contract.mjs
 node test/load-client.mjs "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-skill-url\lib\client.js"
 ```
 
-当前状态：契约测试 **14 项 PASS**，渲染测试 **16 项 PASS**。
+当前状态：契约测试 **14 项 PASS**，渲染测试 **17 项 PASS**（含坑 7 回归）。
 
 两个测试都带**负向对照**思路：把代码改回出事故的写法，测试必须失败（已验证能精确复现 `Cannot read properties of undefined (reading 'listInstalled')` 与 `strict codec has no create() factory`）。
 
