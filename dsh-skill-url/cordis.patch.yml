@@ -1,0 +1,5 @@
+# Bundle layer contributed by dsh-skill-url.
+# Installed automatically when a profile lists this bundle.
+- insert:
+    - id: skill-url
+      name: dsh-skill-url
