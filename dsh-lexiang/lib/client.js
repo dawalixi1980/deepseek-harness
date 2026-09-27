@@ -544,13 +544,22 @@ window.__ModuleLoader__.load({
 				return jsx("div", { className: c.section, children: jsx("p", { className: c.msg, "data-kind": "err", children: fatal }) });
 			}
 			if (settings === null) {
-				return jsx("div", { className: c.section, children: jsx("p", { className: c.busy, children: t("loading") }) });
+				// 硬编码兜底：即使 t() 因 locale 未就绪而返回空，也必须显示可见文字，
+				// 否则「面板空白」会被误判成组件崩溃。
+				return jsx("div", {
+					className: c.section,
+					children: jsx("p", { className: c.busy, children: `${t("loading") || "加载中…"}（正在读取凭证…）` })
+				});
 			}
 
 			const configured = Boolean(settings.configured);
 
-			return jsx("div", {
-				className: c.section,
+			// 渲染护栏：所有 hook 都已在上方调用完毕，所以这里能用 try/catch 包住整段
+			// JSX 构建。否则组件一抛错就被 SlotErrorBoundary 变成**完全空白**，排查时
+			// 什么都看不到（这次就吃了这个亏）。宁可显示一行红字。
+			try {
+				return jsx("div", {
+					className: c.section,
 				children: [
 					// ── 凭证 ──────────────────────────────────────────────
 					jsx("div", {
@@ -875,6 +884,20 @@ window.__ModuleLoader__.load({
 						: null
 				]
 			});
+			} catch (err) {
+				const m = err && err.message ? err.message : String(err);
+				return jsx("div", {
+					className: c.section,
+					children: [
+						jsx("p", { key: "e", className: c.msg, "data-kind": "err", children: `渲染失败：${m}` }),
+						jsx("pre", {
+							key: "s",
+							className: c.kv,
+							children: err && err.stack ? String(err.stack).split("\n").slice(0, 6).join("\n") : ""
+						})
+					]
+				});
+			}
 		}
 
 		// ── cordis 插件体 ─────────────────────────────────────────────────

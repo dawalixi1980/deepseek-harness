@@ -624,6 +624,28 @@ export function apply(ctx) {
       });
       throw err;
     }
+    // 诊断：把客户端每次调用记到一行日志。用来区分「client 没发请求」和
+    // 「client 发了但渲染有问题」——面板空白时这俩原因看起来一模一样。
+    try {
+      const logPath = join(homedir(), ".dsh", "dsh-lexiang.calls.log");
+      for (const m of METHODS) {
+        const orig = service[m].bind(service);
+        service[m] = (...a) => {
+          try {
+            writeFileSync(
+              logPath,
+              `${new Date().toISOString()} ${m} ${JSON.stringify(a && a[0] ? a[0] : null)}\n`,
+              { encoding: "utf8", flag: "a" },
+            );
+          } catch {
+            /* ignore */
+          }
+          return orig(...a);
+        };
+      }
+    } catch {
+      /* ignore */
+    }
     return result;
   }, "dsh-lexiang: typert manifest");
   return service;
