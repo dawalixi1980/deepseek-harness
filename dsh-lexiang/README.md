@@ -137,7 +137,7 @@ node test/load-client.mjs        # 19 项：真实执行 client bundle，含渲�
 
 | 操作 | 结果 |
 |---|---|
-| `testConnection` | ✅ `HerbertCamus @ HerbertCamus的组织` |
+| `testConnection` | ✅ 解析出员工名 / 组织名 / 个人知识库 |
 | `listTeams` | ✅ 示例团队 |
 | `describeSpace`（个人库） | ✅ root_entry_id 解析正确 |
 | `listChildren` | ✅ 目录树正常 |

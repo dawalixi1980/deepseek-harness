@@ -584,7 +584,7 @@ window.__ModuleLoader__.load({
 												key: "i",
 												className: c.input,
 												value: form.companyFrom,
-												placeholder: "18c56fc4a17711f1…",
+												placeholder: "32 位十六进制企业标识",
 												onChange: (e) => setForm((f) => ({ ...f, companyFrom: e.target.value }))
 											})
 										]
