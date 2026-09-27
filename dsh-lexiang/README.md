@@ -169,6 +169,42 @@ transport failure for /api/lexiang/getSettings: HTTP 404
 1. **操作层面**：改 host 代码后**必须真正重启 DSH**（桌面版点 X 只是缩进托盘，进程不死）。
 2. **代码层面**：两侧线名写错不会在编译期报错。所以加了一条测试：把 host `MANIFEST.invocations` 与 client `CONTRIBUTION.descriptors` 的 `namespace/method` **全量对比，多一个少一个都失败**。
 
+**坑 10：插件必须声明 `export const inject = ["typert"]`，否则静默 404**
+
+这是上面那个 404 的**真正根因**（坑 9 只是把它暴露出来的机制）。
+
+重启后 404 依旧，对比 `dsh-skill-url` 才发现差异：
+
+```js
+// dsh-skill-url —— 能激活
+export const name = "skill-url";
+export const inject = ["typert", "skills", "sessions", "agents"];
+export function apply(ctx) { ... }
+
+// dsh-lexiang —— 修复前，缺 inject
+export const name = "dsh-lexiang";   // ← 还应与 patch 的 id 一致
+export function apply(ctx) { ... }
+```
+
+**没有 `inject`，`ctx.typert` 就没被注入**，于是 `ctx.typert.register(MANIFEST)` 从未真正发布远程方法。
+**客户端面板照样能渲染**（client 半独立加载），但每次调用都 404 —— 这正是最迷惑人的地方。
+
+**修法**：
+```js
+export const name = "lexiang";          // 与 cordis.patch.yml 的 id 一致
+export const inject = ["typert"];       // 声明依赖，ctx.typert 才可用
+```
+
+并在 `apply()` 里加了护栏，让这类错误在**启动时**就炸掉，而不是变成难查的 404：
+
+```js
+if (!ctx.typert || typeof ctx.typert.register !== "function") {
+  throw new Error("dsh-lexiang: ctx.typert 不可用 —— 缺少 inject 声明");
+}
+```
+
+> 经验：**客户端能渲染 ≠ 插件激活成功**。判断 host 半是否真的活着，看有没有 404，而不是看面板有没有出现。
+
 ## 测试
 
 ```bash

@@ -382,6 +382,23 @@ await t("apply() 只把 MANIFEST 传给 register（不传 service）", () => {
   assert.equal(registered[0][0], MANIFEST);
   assert.ok(svc instanceof LexiangService, "apply 应返回 service 实例");
 });
+// 这是 404 的根因：插件没声明 inject，ctx.typert 就是空的，
+// register 从未执行 → host 没注册任何路由 → 客户端每次调用都 404。
+await t("声明了 inject 且包含 typert（404 根因回归）", async () => {
+  const mod = await import("../lib/index.js");
+  assert.ok(Array.isArray(mod.inject), "必须导出 inject 数组");
+  assert.ok(mod.inject.includes("typert"), "inject 必须包含 typert");
+});
+await t("插件 name 与 cordis.patch.yml 的 id 一致", async () => {
+  const mod = await import("../lib/index.js");
+  assert.equal(mod.name, "lexiang", "name 必须匹配 patch 里的 id: lexiang");
+  const patch = fs.readFileSync(new URL("../cordis.patch.yml", import.meta.url), "utf8");
+  assert.ok(patch.includes(`id: ${mod.name}`), `patch 里应出现 "id: ${mod.name}"`);
+});
+await t("ctx.typert 缺失时 apply() 立刻报错（而不是静默 404）", () => {
+  const ctx = { effect: () => {} };
+  assert.throws(() => apply(ctx), /ctx\.typert 不可用/);
+});
 
 try { fs.unlinkSync(tmpFile); } catch {}
 console.log(`\n${fail === 0 ? "全部通过" : "有失败"}：${pass} passed, ${fail} failed\n`);

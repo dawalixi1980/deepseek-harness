@@ -45,7 +45,27 @@ import {
   STATE_FILE,
 } from "./store.js";
 
-export const name = "dsh-lexiang";
+/**
+ * Plugin name — must match the `id` in cordis.patch.yml, exactly like
+ * dsh-skill-url does (`export const name = "skill-url"` for `id: skill-url`).
+ */
+export const name = "lexiang";
+
+/**
+ * Services this plugin needs before apply() runs.
+ *
+ * MISSING `inject` WAS THE ROOT CAUSE OF THE 404:
+ * without declaring `typert`, `ctx.typert` is not wired up, so
+ * `ctx.typert.register(MANIFEST)` never publishes the remote methods. The
+ * client half still renders its panel (it loads independently), but every call
+ * then fails with
+ *   "transport failure for /api/lexiang/getSettings: HTTP 404"
+ * because the host registered no route.
+ *
+ * dsh-skill-url declares `["typert", "skills", "sessions", "agents"]`; we only
+ * need `typert`.
+ */
+export const inject = ["typert"];
 
 /** Shape of every remote reply: { ok, data?, error? }. */
 const ok = (data) => ({ ok: true, data: data === undefined ? null : data });
@@ -531,9 +551,19 @@ export class LexiangService extends TypertRemoteService {
 /**
  * Cordis plugin entry. `register(MANIFEST)` takes the manifest ONLY — the
  * service is constructed by cordis from this class, not passed in.
+ *
+ * Guard rail: if `ctx.typert` is absent we are missing the `inject` declaration
+ * (see above) and every remote call would 404 at runtime. Failing here instead
+ * makes that mistake obvious at boot rather than as a confusing 404 in the UI.
  */
 export function apply(ctx) {
   const service = new LexiangService(ctx);
+  if (!ctx || !ctx.typert || typeof ctx.typert.register !== "function") {
+    throw new Error(
+      "dsh-lexiang: ctx.typert 不可用 —— 缺少 `export const inject = [\"typert\"]`，" +
+        "远程方法将无法注册（客户端会收到 HTTP 404）",
+    );
+  }
   ctx.effect(() => ctx.typert.register(MANIFEST), "dsh-lexiang: typert manifest");
   return service;
 }
