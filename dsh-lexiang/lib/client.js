@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-lexiang —— client 半（浏览器）。
  *
  * 手写 bundle（非构建产物）：由 host 在 /plugins/dsh-lexiang/client.js 提供，
@@ -334,6 +334,9 @@ window.__ModuleLoader__.load({
 			const [hits, setHits] = react.useState(null);
 			const [fatal, setFatal] = react.useState("");
 			const fileRef = react.useRef(null);
+			// 根节点 ref：用来在信标里报告「到底渲染出来了什么、可不可见」。
+			// 面板空白时这是唯一能区分「没渲染」和「渲染了但看不见」的办法。
+			const rootRef = react.useRef(null);
 
 			const say = (kind, text) => setMsg({ kind, text });
 			const guard = react.useCallback(
@@ -352,14 +355,24 @@ window.__ModuleLoader__.load({
 				[]
 			);
 
+			// face 用 ref 固定：`face = props.face ?? props`，而 props 每次渲染都是
+			// 新对象，所以 `[face]` 依赖**每次渲染都会变**。那会让 effect 反复重跑，
+			// 清理函数把 alive 置 false，于是正在飞行的 getSettings 响应被静默丢弃
+			// —— settings 永远是 null，面板永远停在加载态。dsh-skill-url 之所以没
+			// 这个问题，是因为它根本不用 alive 标志。这里改用 ref + 空依赖：挂载时
+			// 只跑一次，且永远拿到最新的 face。
+			const faceRef = react.useRef(face);
+			faceRef.current = face;
+
 			// 首次挂载：读凭证。任何异常都要吞掉并显示红字，绝不抛出（踩坑 4）。
 			react.useEffect(() => {
 				let alive = true;
 				(async () => {
+					const f = faceRef.current;
 					// 诊断：把 DSH 实际传入的 props 结构报给 host 落盘。
 					// 面板空白时这是唯一能拿到真相的途径（renderer 没有 fs 权限）。
 					try {
-						if (typeof face.debugLog === "function") {
+						if (typeof f.debugLog === "function") {
 							const keys = Object.keys(props);
 							const snapshot = {};
 							for (const k of keys) {
@@ -371,45 +384,48 @@ window.__ModuleLoader__.load({
 									catch { snapshot[k] = "[object]"; }
 								} else snapshot[k] = String(v).slice(0, 120);
 							}
-							await face.debugLog({
+							await f.debugLog({
 								propKeys: keys,
 								snapshot,
 								hasT: typeof props.t,
 								hasFace: typeof props.face,
-								hasGetSettings: typeof face.getSettings,
-								faceIsProps: face === props,
+								hasGetSettings: typeof f.getSettings,
+								faceIsProps: f === props,
 								ns: NS
 							});
 						}
 					} catch { /* 诊断失败不影响主流程 */ }
 
 					try {
-						if (typeof face.getSettings !== "function") {
+						if (typeof f.getSettings !== "function") {
 							if (alive) setFatal("远程服务未就绪：face.getSettings 不可用（host 半可能未加载或线名不匹配）");
 							return;
 						}
-						const s = await face.getSettings();
+						const s = await f.getSettings();
 						if (!alive) return;
 						setSettings(s);
-						setForm((f) => ({ ...f, companyFrom: s.companyFrom || "", endpoint: s.endpoint || "" }));
+						setForm((prev) => ({ ...prev, companyFrom: (s && s.companyFrom) || "", endpoint: (s && s.endpoint) || "" }));
 					} catch (err) {
 						if (alive) setFatal(`初始化失败：${err && err.message ? err.message : err}`);
 					}
 				})();
 				return () => { alive = false; };
-			}, [face]);
+			}, []);
 
 			// 已配置时自动拉团队与知识库。
+			// 依赖里**不能放 face**：props 每次渲染都是新对象，face 因此每次都变，
+			// 会让这个 useCallback 和下面依赖它的 effect 每帧重跑。用 faceRef 取值。
 			const loadSpaces = react.useCallback(async () => {
+				const f = faceRef.current;
 				if (!settings?.configured) return;
-				const ts = await face.listTeams();
+				const ts = await f.listTeams();
 				setTeams(ts.teams || []);
 				const teamId = ts.teams && ts.teams[0] ? ts.teams[0].id : undefined;
-				const ps = await face.listSpaces({ teamId });
+				const ps = await f.listSpaces({ teamId });
 				setSpaces(ps.spaces || []);
 				// 个人库也放进来，方便一键切换。
 				try {
-					const personal = await face.describeSpace({});
+					const personal = await f.describeSpace({});
 					if (personal && personal.id) {
 						setSpaces((prev) =>
 							prev.some((s) => s.id === personal.id)
@@ -420,21 +436,18 @@ window.__ModuleLoader__.load({
 						setRootId((cur) => cur || personal.rootEntryId);
 					}
 				} catch { /* 个人库不可用时忽略 */ }
-			}, [face, settings]);
+			}, [settings]);
 
 			react.useEffect(() => {
 				if (!settings?.configured) return;
 				guard("加载知识库", loadSpaces);
 			}, [settings?.configured, loadSpaces, guard]);
 
-			const loadTree = react.useCallback(
-				async (parentId) => {
-					if (!parentId) return;
-					const r = await face.listChildren({ parentId });
-					setTree(r.entries || []);
-				},
-				[face]
-			);
+			const loadTree = react.useCallback(async (parentId) => {
+				if (!parentId) return;
+				const r = await faceRef.current.listChildren({ parentId });
+				setTree(r.entries || []);
+			}, []);
 
 			const onPickSpace = async (id) => {
 				setSpaceId(id);
@@ -572,13 +585,40 @@ window.__ModuleLoader__.load({
 				try {
 					if (typeof face.debugLog === "function") {
 						const keys = settings && typeof settings === "object" ? Object.keys(settings) : [];
+						// DOM 实况：区分「没渲染出来」和「渲染了但看不见」。
+						let dom = "no element";
+						try {
+							const el = rootRef.current;
+							if (el && typeof el.getBoundingClientRect === "function") {
+								const r = el.getBoundingClientRect();
+								const cs = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
+								dom = {
+									tag: el.tagName,
+									cls: String(el.className || ""),
+									w: Math.round(r.width),
+									h: Math.round(r.height),
+									display: cs ? cs.display : "?",
+									visibility: cs ? cs.visibility : "?",
+									opacity: cs ? cs.opacity : "?",
+									parentCls: el.parentElement ? String(el.parentElement.className || "") : "no parent",
+									parentDisplay: el.parentElement && typeof getComputedStyle === "function" ? getComputedStyle(el.parentElement).display : "?",
+									text: String(el.textContent || "").slice(0, 200),
+									htmlLen: String(el.innerHTML || "").length
+								};
+							} else if (el) {
+								dom = "ref set but not a DOM node: " + String(el && el.constructor && el.constructor.name);
+							}
+						} catch (e) {
+							dom = "dom probe failed: " + (e && e.message ? e.message : String(e));
+						}
 						face.debugLog({
 							phase: "render",
 							settingsIsObject: !!(settings && typeof settings === "object"),
 							settingsKeys: keys,
 							configured: !!(settings && settings.configured),
 							fatal: fatal || "",
-							busy: busy || ""
+							busy: busy || "",
+							dom
 						}).catch(() => {});
 					}
 				} catch { /* ignore */ }
@@ -586,7 +626,7 @@ window.__ModuleLoader__.load({
 
 			// 致命错误：显示红字而不是空白（踩坑 4）。
 			if (fatal) {
-				return jsx("div", { className: c.section, children: jsx("p", { className: c.msg, "data-kind": "err", children: fatal }) });
+				return jsx("div", { ref: rootRef, className: c.section, children: jsx("p", { className: c.msg, "data-kind": "err", children: fatal }) });
 			}
 			if (!settings || typeof settings !== "object") {
 				// 硬编码兜底：即使 t() 因 locale 未就绪而返回空，也必须显示可见文字，
@@ -594,6 +634,7 @@ window.__ModuleLoader__.load({
 				// 用 `!settings` 而不是 `=== null`：getSettings 若解析成 undefined，
 				// 下面 settings.configured 会在 try 之外抛错 → 整块变空白。
 				return jsx("div", {
+					ref: rootRef,
 					className: c.section,
 					children: jsx("p", { className: c.busy, children: `${t("loading") || "加载中…"}（正在读取凭证…）` })
 				});
@@ -606,6 +647,7 @@ window.__ModuleLoader__.load({
 			try {
 				const configured = Boolean(settings.configured);
 				return jsx("div", {
+					ref: rootRef,
 					className: c.section,
 				children: [
 					// ── 凭证 ──────────────────────────────────────────────

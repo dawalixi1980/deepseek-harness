@@ -395,9 +395,25 @@ await t("插件 name 与 cordis.patch.yml 的 id 一致", async () => {
   const patch = fs.readFileSync(new URL("../cordis.patch.yml", import.meta.url), "utf8");
   assert.ok(patch.includes(`id: ${mod.name}`), `patch 里应出现 "id: ${mod.name}"`);
 });
-await t("ctx.typert 缺失时 apply() 立刻报错（而不是静默 404）", () => {
+await t("ctx.typert 缺失时 apply() 立刻报错（而不是静默 404）", async () => {
+  // 用 cache-busting 导入拿全新模块实例：alreadyActivated 是模块级标志，
+  // 前面的用例已成功激活过，同一实例里不会再抛。
+  const fresh = await import(`../lib/index.js?guard=${Date.now()}`);
   const ctx = { effect: () => {} };
-  assert.throws(() => apply(ctx), /ctx\.typert 不可用/);
+  assert.throws(() => fresh.apply(ctx), /ctx\.typert 不可用/);
+});
+await t("重复 apply()（HMR 重载）不再抛错，避免把已激活的插件标记为失败", async () => {
+  const fresh = await import(`../lib/index.js?reapply=${Date.now()}`);
+  let count = 0;
+  const good = {
+    effect: (fn) => { count += 1; fn(); },
+    typert: { register: () => () => {} },
+  };
+  fresh.apply(good);
+  const first = count;
+  assert.equal(first, 1, "首次应注册一次");
+  assert.doesNotThrow(() => fresh.apply({ effect: () => {} }));
+  assert.equal(count, first, "第二次没有 typert 时不应再注册");
 });
 // 又一个 404 根因：cordis 把模块的 default 导出当作插件本体。若 default 是
 // 服务类，cordis 就用它当插件、根本不调用 apply()，于是 MANIFEST 从未注册，

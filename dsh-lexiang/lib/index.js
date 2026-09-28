@@ -594,9 +594,14 @@ export class LexiangService extends TypertRemoteService {
  * (see above) and every remote call would 404 at runtime. Failing here instead
  * makes that mistake obvious at boot rather than as a confusing 404 in the UI.
  */
+/**
+ * Set once the manifest has been handed to ctx.typert.register() successfully.
+ * DSH calls apply() again on reload; the guard must not throw in that case.
+ */
+let alreadyActivated = false;
+
 export function apply(ctx) {
-  const diag = (name, payload) => {
-    try {
+  const diag = (name, payload) => {    try {
       writeFileSync(
         join(homedir(), ".dsh", `dsh-lexiang.${name}.json`),
         `${JSON.stringify(payload, null, 2)}\n`,
@@ -616,7 +621,17 @@ export function apply(ctx) {
 
   const service = new LexiangService(ctx);
   if (!ctx || !ctx.typert || typeof ctx.typert.register !== "function") {
-    diag("error", { stage: "guard", message: "ctx.typert unavailable" });
+    diag("error", {
+      at: new Date().toISOString(),
+      stage: "guard",
+      message: "ctx.typert unavailable",
+      alreadyActivated,
+    });
+    // DSH 会在 HMR / 重新加载时再次调用 apply()，而那种上下文里 ctx.typert 可能
+    // 不可用。此时**绝不能抛**：一次成功的注册会被后来的抛错标记成插件失败，
+    // 表现就是分区突然变空白。只在从未成功激活过时才抛，这样真正的 inject
+    // 漏声明仍然会立刻暴露。
+    if (alreadyActivated) return service;
     throw new Error(
       "dsh-lexiang: ctx.typert 不可用 —— 缺少 `export const inject = [\"typert\"]`，" +
         "远程方法将无法注册（客户端会收到 HTTP 404）",
@@ -629,6 +644,7 @@ export function apply(ctx) {
     let result;
     try {
       result = ctx.typert.register(MANIFEST);
+      alreadyActivated = true;
       diag("registered", {
         at: new Date().toISOString(),
         invocations: MANIFEST.invocations.length,
