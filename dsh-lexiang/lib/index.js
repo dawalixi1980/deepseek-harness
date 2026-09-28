@@ -145,6 +145,7 @@ export const METHODS = [
   "moveEntry",
   "removeEntry",
   "uploadFile",
+  "debugLog",
 ];
 
 export const MANIFEST = {
@@ -501,6 +502,26 @@ export class LexiangService extends TypertRemoteService {
         validity_type: "force_expire",
       });
       return ok({ id: entryId, removed: true });
+    } catch (err) {
+      return fail(err);
+    }
+  }
+
+  // ------------------------------------------------------------------ debug
+
+  /**
+   * Diagnostic sink. The renderer has no filesystem access, so the panel sends
+   * whatever it needs inspected here and the host writes it to disk. Used to
+   * learn exactly which props DSH passes to a settings section.
+   */
+  debugLog(payload) {
+    try {
+      writeFileSync(
+        join(homedir(), ".dsh", "dsh-lexiang.debug.json"),
+        `${JSON.stringify({ at: new Date().toISOString(), payload }, null, 2)}\n`,
+        "utf8",
+      );
+      return ok({ written: true });
     } catch (err) {
       return fail(err);
     }

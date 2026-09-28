@@ -210,7 +210,8 @@ window.__ModuleLoader__.load({
 		const METHODS = [
 			"getSettings", "saveSettings", "clearSettings", "testConnection",
 			"listTeams", "listSpaces", "describeSpace", "listChildren", "readEntry",
-			"search", "createEntry", "renameEntry", "moveEntry", "removeEntry", "uploadFile"
+			"search", "createEntry", "renameEntry", "moveEntry", "removeEntry", "uploadFile",
+			"debugLog"
 		];
 
 		const CONTRIBUTION = {
@@ -356,6 +357,33 @@ window.__ModuleLoader__.load({
 			useEffect(() => {
 				let alive = true;
 				(async () => {
+					// 诊断：把 DSH 实际传入的 props 结构报给 host 落盘。
+					// 面板空白时这是唯一能拿到真相的途径（renderer 没有 fs 权限）。
+					try {
+						if (typeof face.debugLog === "function") {
+							const keys = Object.keys(props);
+							const snapshot = {};
+							for (const k of keys) {
+								const v = props[k];
+								if (typeof v === "function") snapshot[k] = "[function]";
+								else if (v === null || v === undefined) snapshot[k] = String(v);
+								else if (typeof v === "object") {
+									try { snapshot[k] = "[object keys=" + Object.keys(v).slice(0, 25).join(",") + "]"; }
+									catch { snapshot[k] = "[object]"; }
+								} else snapshot[k] = String(v).slice(0, 120);
+							}
+							await face.debugLog({
+								propKeys: keys,
+								snapshot,
+								hasT: typeof props.t,
+								hasFace: typeof props.face,
+								hasGetSettings: typeof face.getSettings,
+								faceIsProps: face === props,
+								ns: NS
+							});
+						}
+					} catch { /* 诊断失败不影响主流程 */ }
+
 					try {
 						if (typeof face.getSettings !== "function") {
 							if (alive) setFatal("远程服务未就绪：face.getSettings 不可用（host 半可能未加载或线名不匹配）");
@@ -539,25 +567,45 @@ window.__ModuleLoader__.load({
 				}
 			};
 
+			// 渲染状态信标：每次渲染后把组件内部状态报给 host 落盘。面板空白时，
+			// 这是唯一能看出「组件到底渲染到哪一步」的办法。
+			useEffect(() => {
+				try {
+					if (typeof face.debugLog === "function") {
+						const keys = settings && typeof settings === "object" ? Object.keys(settings) : [];
+						face.debugLog({
+							phase: "render",
+							settingsIsObject: !!(settings && typeof settings === "object"),
+							settingsKeys: keys,
+							configured: !!(settings && settings.configured),
+							fatal: fatal || "",
+							busy: busy || ""
+						}).catch(() => {});
+					}
+				} catch { /* ignore */ }
+			});
+
 			// 致命错误：显示红字而不是空白（踩坑 4）。
 			if (fatal) {
 				return jsx("div", { className: c.section, children: jsx("p", { className: c.msg, "data-kind": "err", children: fatal }) });
 			}
-			if (settings === null) {
+			if (!settings || typeof settings !== "object") {
 				// 硬编码兜底：即使 t() 因 locale 未就绪而返回空，也必须显示可见文字，
 				// 否则「面板空白」会被误判成组件崩溃。
+				// 用 `!settings` 而不是 `=== null`：getSettings 若解析成 undefined，
+				// 下面 settings.configured 会在 try 之外抛错 → 整块变空白。
 				return jsx("div", {
 					className: c.section,
 					children: jsx("p", { className: c.busy, children: `${t("loading") || "加载中…"}（正在读取凭证…）` })
 				});
 			}
 
-			const configured = Boolean(settings.configured);
-
 			// 渲染护栏：所有 hook 都已在上方调用完毕，所以这里能用 try/catch 包住整段
 			// JSX 构建。否则组件一抛错就被 SlotErrorBoundary 变成**完全空白**，排查时
 			// 什么都看不到（这次就吃了这个亏）。宁可显示一行红字。
+			// `configured` 必须在 try 之内求值，否则它抛错时护栏也救不了。
 			try {
+				const configured = Boolean(settings.configured);
 				return jsx("div", {
 					className: c.section,
 				children: [
@@ -942,7 +990,8 @@ window.__ModuleLoader__.load({
 				renameEntry: (args) => callRemote("renameEntry", args),
 				moveEntry: (args) => callRemote("moveEntry", args),
 				removeEntry: (args) => callRemote("removeEntry", args),
-				uploadFile: (args) => callRemote("uploadFile", args)
+				uploadFile: (args) => callRemote("uploadFile", args),
+				debugLog: (args) => callRemote("debugLog", args)
 			});
 
 			ctx.slots.inject("settings.section", () =>
