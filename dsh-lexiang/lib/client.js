@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-lexiang —— client 半（浏览器）。
  *
  * 手写 bundle（非构建产物）：由 host 在 /plugins/dsh-lexiang/client.js 提供，
@@ -32,7 +32,6 @@ window.__ModuleLoader__.load({
 		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		const { jsx, Fragment } = react_jsx_runtime;
-		const { useState, useEffect, useCallback, useRef, useMemo } = react;
 
 		// ── 样式（前缀 LX_ 避免冲突）────────────────────────────────────
 		const css = [
@@ -244,11 +243,11 @@ window.__ModuleLoader__.load({
 		 * 注意 props 摊平问题（踩坑 3）：本组件由父级显式传 face。
 		 */
 		function TreeNode({ entry, depth, face, activeId, onPick, onError }) {
-			const [open, setOpen] = useState(false);
-			const [kids, setKids] = useState(null);
-			const [busy, setBusy] = useState(false);
+			const [open, setOpen] = react.useState(false);
+			const [kids, setKids] = react.useState(null);
+			const [busy, setBusy] = react.useState(false);
 
-			const toggle = useCallback(async (ev) => {
+			const toggle = react.useCallback(async (ev) => {
 				if (ev) ev.stopPropagation();
 				if (!entry.hasChildren && entry.type !== "folder") return;
 				if (open) { setOpen(false); return; }
@@ -319,25 +318,25 @@ window.__ModuleLoader__.load({
 			const face = props.face ?? props;
 			const t = props.t || ((k) => zh[k] || k);
 
-			const [settings, setSettings] = useState(null);
-			const [form, setForm] = useState({ companyFrom: "", token: "", endpoint: "" });
-			const [msg, setMsg] = useState(null);
-			const [busy, setBusy] = useState("");
-			const [teams, setTeams] = useState([]);
-			const [spaces, setSpaces] = useState([]);
-			const [spaceId, setSpaceId] = useState("");
-			const [rootId, setRootId] = useState("");
-			const [tree, setTree] = useState([]);
-			const [picked, setPicked] = useState(null);
-			const [body, setBody] = useState("");
-			const [query, setQuery] = useState("");
-			const [mode, setMode] = useState("keyword");
-			const [hits, setHits] = useState(null);
-			const [fatal, setFatal] = useState("");
-			const fileRef = useRef(null);
+			const [settings, setSettings] = react.useState(null);
+			const [form, setForm] = react.useState({ companyFrom: "", token: "", endpoint: "" });
+			const [msg, setMsg] = react.useState(null);
+			const [busy, setBusy] = react.useState("");
+			const [teams, setTeams] = react.useState([]);
+			const [spaces, setSpaces] = react.useState([]);
+			const [spaceId, setSpaceId] = react.useState("");
+			const [rootId, setRootId] = react.useState("");
+			const [tree, setTree] = react.useState([]);
+			const [picked, setPicked] = react.useState(null);
+			const [body, setBody] = react.useState("");
+			const [query, setQuery] = react.useState("");
+			const [mode, setMode] = react.useState("keyword");
+			const [hits, setHits] = react.useState(null);
+			const [fatal, setFatal] = react.useState("");
+			const fileRef = react.useRef(null);
 
 			const say = (kind, text) => setMsg({ kind, text });
-			const guard = useCallback(
+			const guard = react.useCallback(
 				async (label, fn) => {
 					setBusy(label);
 					try {
@@ -354,7 +353,7 @@ window.__ModuleLoader__.load({
 			);
 
 			// 首次挂载：读凭证。任何异常都要吞掉并显示红字，绝不抛出（踩坑 4）。
-			useEffect(() => {
+			react.useEffect(() => {
 				let alive = true;
 				(async () => {
 					// 诊断：把 DSH 实际传入的 props 结构报给 host 落盘。
@@ -401,7 +400,7 @@ window.__ModuleLoader__.load({
 			}, [face]);
 
 			// 已配置时自动拉团队与知识库。
-			const loadSpaces = useCallback(async () => {
+			const loadSpaces = react.useCallback(async () => {
 				if (!settings?.configured) return;
 				const ts = await face.listTeams();
 				setTeams(ts.teams || []);
@@ -423,12 +422,12 @@ window.__ModuleLoader__.load({
 				} catch { /* 个人库不可用时忽略 */ }
 			}, [face, settings]);
 
-			useEffect(() => {
+			react.useEffect(() => {
 				if (!settings?.configured) return;
 				guard("加载知识库", loadSpaces);
 			}, [settings?.configured, loadSpaces, guard]);
 
-			const loadTree = useCallback(
+			const loadTree = react.useCallback(
 				async (parentId) => {
 					if (!parentId) return;
 					const r = await face.listChildren({ parentId });
@@ -569,7 +568,7 @@ window.__ModuleLoader__.load({
 
 			// 渲染状态信标：每次渲染后把组件内部状态报给 host 落盘。面板空白时，
 			// 这是唯一能看出「组件到底渲染到哪一步」的办法。
-			useEffect(() => {
+			react.useEffect(() => {
 				try {
 					if (typeof face.debugLog === "function") {
 						const keys = settings && typeof settings === "object" ? Object.keys(settings) : [];

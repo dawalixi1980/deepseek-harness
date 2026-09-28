@@ -491,6 +491,19 @@ check("关键按钮文案确实出现在树里", () => {
   if (txt.includes("remove")) throw new Error("未选中条目却渲染了删除按钮");
 });
 
+// DSH 的 require("react") 是惰性互操作命名空间：在模块求值期解构 hooks 可能
+// 拿到 undefined，调用时抛 "useState is not a function"，组件随即被
+// SlotErrorBoundary 变成**完全空白**。dsh-skill-url 用 react.useState(...) 的
+// 属性访问形式，这里必须对齐。
+check("不在模块求值期解构 React hooks（必须用 react.useState(...)）", () => {
+  const src = fs.readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  const bad = /const\s*\{[^}]*\b(useState|useEffect|useCallback|useRef|useMemo|useReducer|useContext)\b[^}]*\}\s*=\s*react\b/.exec(src);
+  if (bad) throw new Error(`求值期解构了 hooks: ${bad[0].slice(0, 80)}`);
+  if (/react\.react\./.test(src)) throw new Error("出现了 react.react.");
+  const n = (src.match(/react\.(useState|useEffect|useCallback|useRef|useMemo)\(/g) || []).length;
+  if (n < 5) throw new Error(`属性访问形式的 hook 调用过少: ${n}`);
+});
+
 await Promise.allSettled(pendingChecks);
 console.log(`\n${fail === 0 ? "全部通过" : "有失败"}：${pass} passed, ${fail} failed`);
 console.log("client bundle 可以安全安装。\n");
