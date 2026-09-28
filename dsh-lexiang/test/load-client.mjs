@@ -301,9 +301,13 @@ check("未配置时渲染出凭证表单（含输入框与保存按钮）", () =
     uploadFile: async () => ({}),
   };
   const { vnode } = renderWith(face);
-  // settings 初始为 null → 显示 loading
+  // 设计变更：首帧就渲染凭证表单，不再有「等 getSettings 才显示」的异步门槛。
+  // 之前的 loading 门槛让「响应丢失」和「组件崩溃」长得一模一样。
   const txt = textOf(vnode).join(" ");
-  if (!txt.includes("loading")) throw new Error("初始应显示 loading，实际文本: " + txt.slice(0, 120));
+  if (!txt.includes("credTitle")) throw new Error("首帧应直接渲染凭证表单，实际文本: " + txt.slice(0, 160));
+  for (const key of ["companyFrom", "token", "endpoint", "save", "test", "clear"]) {
+    if (!txt.includes(key)) throw new Error(`缺少表单元素: ${key}`);
+  }
 });
 
 check("props.face 不存在时也能工作（摊平兼容）", () => {
@@ -352,14 +356,17 @@ check("挂载 effect 会调用 getSettings 并把结果落到界面", async () =
 });
 
 check("getSettings 缺失时不抛错，而是显示红字诊断", async () => {
+  // 首帧就应该有表单（不再有 loading 门槛）
   const { vnode } = renderWith({});
-  const txt = textOf(vnode).join(" ");
-  // 没有 getSettings → 初始仍显示 loading；effect 跑完后应转为错误
+  const first = textOf(vnode).join(" ");
+  if (!first.includes("credTitle")) throw new Error("首帧应渲染表单，实际: " + first.slice(0, 160));
+  // effect 跑完后应转为错误诊断
   const { effects } = renderWith({});
   for (const fn of effects) fn();
   await new Promise((r) => setTimeout(r, 10));
-  if (!txt.includes("loading") && !txt.includes("初始化失败") && !txt.includes("远程服务未就绪")) {
-    throw new Error("应显示 loading 或诊断文本，实际: " + txt.slice(0, 160));
+  const after = textOf(renderWith({}).vnode).join(" ");
+  if (!after.includes("远程服务未就绪") && !after.includes("初始化失败")) {
+    throw new Error("缺少 getSettings 时应显示红字诊断，实际: " + after.slice(0, 160));
   }
 });
 

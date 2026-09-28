@@ -318,7 +318,23 @@ window.__ModuleLoader__.load({
 			const face = props.face ?? props;
 			const t = props.t || ((k) => zh[k] || k);
 
-			const [settings, setSettings] = react.useState(null);
+			// settings 的初值**必须是一个可用的空对象，而不是 null**。
+			// 用 null 会让整块面板依赖一个异步门槛：只要 getSettings 的响应没回来
+			// （被丢弃、超时、组件已卸载），面板就永远停在加载态 —— 而它看起来
+			// 和「组件崩溃」一模一样，正是这次排查了 8 轮的元凶。
+			// 现在首帧就渲染凭证表单，getSettings 回来后再填值。
+			const EMPTY_SETTINGS = {
+				companyFrom: "",
+				hasToken: false,
+				tokenMasked: "",
+				endpoint: "",
+				activeSpaceId: "",
+				recent: [],
+				configured: false,
+				stateFile: ""
+			};
+			const [settings, setSettings] = react.useState(EMPTY_SETTINGS);
+			const [loaded, setLoaded] = react.useState(false);
 			const [form, setForm] = react.useState({ companyFrom: "", token: "", endpoint: "" });
 			const [msg, setMsg] = react.useState(null);
 			const [busy, setBusy] = react.useState("");
@@ -402,9 +418,14 @@ window.__ModuleLoader__.load({
 							return;
 						}
 						const s = await f.getSettings();
-						if (!alive) return;
-						setSettings(s);
-						setForm((prev) => ({ ...prev, companyFrom: (s && s.companyFrom) || "", endpoint: (s && s.endpoint) || "" }));
+						// 不用 alive 丢弃响应：dsh-skill-url 也没有这个标志，而它正是
+						// 「响应回来但被静默扔掉 → 面板停在加载态」的来源。组件卸载后
+						// 再 setState 在 React 18+ 是安全的空操作。
+						if (s && typeof s === "object") {
+							setSettings((prev) => ({ ...prev, ...s }));
+							setForm((prev) => ({ ...prev, companyFrom: s.companyFrom || "", endpoint: s.endpoint || "" }));
+						}
+						setLoaded(true);
 					} catch (err) {
 						if (alive) setFatal(`初始化失败：${err && err.message ? err.message : err}`);
 					}
@@ -628,17 +649,8 @@ window.__ModuleLoader__.load({
 			if (fatal) {
 				return jsx("div", { ref: rootRef, className: c.section, children: jsx("p", { className: c.msg, "data-kind": "err", children: fatal }) });
 			}
-			if (!settings || typeof settings !== "object") {
-				// 硬编码兜底：即使 t() 因 locale 未就绪而返回空，也必须显示可见文字，
-				// 否则「面板空白」会被误判成组件崩溃。
-				// 用 `!settings` 而不是 `=== null`：getSettings 若解析成 undefined，
-				// 下面 settings.configured 会在 try 之外抛错 → 整块变空白。
-				return jsx("div", {
-					ref: rootRef,
-					className: c.section,
-					children: jsx("p", { className: c.busy, children: `${t("loading") || "加载中…"}（正在读取凭证…）` })
-				});
-			}
+			// 注意：这里**没有** `settings == null → 加载中` 的早返回。
+			// 凭证表单首帧就渲染，异步结果只负责填值。面板不可能再空白。
 
 			// 渲染护栏：所有 hook 都已在上方调用完毕，所以这里能用 try/catch 包住整段
 			// JSX 构建。否则组件一抛错就被 SlotErrorBoundary 变成**完全空白**，排查时
@@ -737,7 +749,7 @@ window.__ModuleLoader__.load({
 									busy ? jsx("span", { key: "b", className: c.busy, children: `${busy}…` }) : null
 								]
 							}),
-							jsx("div", { key: "kv", className: c.kv, children: `state: ${settings.stateFile || "~/.dsh/dsh-lexiang.json"}` }),
+							jsx("div", { key: "kv", className: c.kv, children: `state: ${settings.stateFile || "~/.dsh/dsh-lexiang.json"}${loaded ? "" : "（正在读取…）"}` }),
 							msg ? jsx("p", { key: "m", className: c.msg, "data-kind": msg.kind, children: msg.text }) : null
 						]
 					}),

@@ -23,7 +23,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --import ./test/register-stub.mjs test/lexiang-api.test.mjs && node --import ./test/register-stub.mjs test/host.test.mjs && node --import ./test/register-stub.mjs test/load-client.mjs"
+    "test": "node --import ./test/register-stub.mjs test/lexiang-api.test.mjs && node --import ./test/register-stub.mjs test/host.test.mjs && node --import ./test/register-stub.mjs test/load-client.mjs && node test/effect-lifecycle.test.mjs"
   },
   "keywords": [
     "dsh",
