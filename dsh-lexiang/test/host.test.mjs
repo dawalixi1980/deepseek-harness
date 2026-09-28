@@ -306,7 +306,7 @@ await t("renameEntry 传 entry_id + name", async () => {
 console.log("\n=== 三步上传 ===");
 await t("uploadFile 走 apply -> PUT -> commit", async () => {
   const f = routedFetch({
-    file_apply_upload: () => ({ code: 0, data: { session: { session_id: "S1", upload_url: "https://cos.example/put" } } }),
+    file_apply_upload: () => ({ code: 0, data: { session: { type: "PRE_SIGNED_URL", session_id: "S1", objects: [{ key: "k", mime_type: "text/plain", upload_url: "https://cos.example/put" }] } } }),
     file_commit_upload: () => ({ code: 0, data: { entry: { id: "file1", name: "a.pdf" } } }),
     put: () => ({ status: 200 }),
   });
@@ -350,7 +350,7 @@ await t("uploadFile 走 apply -> PUT -> commit", async () => {
 });
 await t("uploadFile 未传 mimeType 时按扩展名推断", async () => {
   const f = routedFetch({
-    file_apply_upload: () => ({ code: 0, data: { session: { session_id: "S1", upload_url: "https://cos.example/put" } } }),
+    file_apply_upload: () => ({ code: 0, data: { session: { type: "PRE_SIGNED_URL", session_id: "S1", objects: [{ key: "k", mime_type: "text/plain", upload_url: "https://cos.example/put" }] } } }),
     file_commit_upload: () => ({ code: 0, data: { entry: { id: "x" } } }),
     put: () => ({ status: 200 }),
   });
@@ -367,7 +367,7 @@ await t("uploadFile 未传 mimeType 时按扩展名推断", async () => {
 });
 await t("uploadFile PUT 失败时报 NETWORK", async () => {
   const f = routedFetch({
-    file_apply_upload: () => ({ code: 0, data: { session: { session_id: "S1", upload_url: "https://cos.example/put" } } }),
+    file_apply_upload: () => ({ code: 0, data: { session: { type: "PRE_SIGNED_URL", session_id: "S1", objects: [{ key: "k", mime_type: "text/plain", upload_url: "https://cos.example/put" }] } } }),
     put: () => ({ status: 403 }),
   });
   const svc = freshService(f);
@@ -381,6 +381,46 @@ await t("uploadFile 缺 fileName 报错", async () => {
   captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
   const r = await captureAsync(() => svc.uploadFile({ parentId: "p", contentBase64: "aGk=" }));
   assert.equal(r.ok, false);
+});
+// 服务端真实返回把 upload_url 放在 session.objects[0] 里，而 SKILL.md 的示例写的是
+// session.upload_url。曾经只读后者 → undefined → 上传中止在第二步，尽管第一步已成功。
+// 两种形状都必须支持。
+await t("uploadFile 支持真实响应形状 session.objects[0].upload_url", async () => {
+  const f = routedFetch({
+    file_apply_upload: () => ({
+      code: 0,
+      data: {
+        session: {
+          type: "PRE_SIGNED_URL",
+          session_id: "S-obj",
+          objects: [{ key: "k", mime_type: "text/plain", upload_url: "https://cos.example/obj-put" }],
+        },
+      },
+    }),
+    file_commit_upload: () => ({ code: 0, data: { entry: { id: "e-obj" } } }),
+    put: () => ({ status: 200 }),
+  });
+  const svc = freshService(f);
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.uploadFile({ parentId: "p", fileName: "a.txt", contentBase64: "aGk=" }));
+  assert.equal(r.ok, true, `应当成功: ${JSON.stringify(r.error)}`);
+  assert.equal(r.value.sessionId, "S-obj");
+  const putCall = f.calls.find((x) => x.method === "PUT");
+  assert.equal(putCall.url, "https://cos.example/obj-put", "必须用 objects[0] 里的 URL");
+  assert.equal(putCall.headers["Content-Length"], "2", "签名覆盖 content-length，必须显式带上");
+});
+await t("uploadFile 也兼容简化的 session.upload_url", async () => {
+  const f = routedFetch({
+    file_apply_upload: () => ({ code: 0, data: { session: { session_id: "S-simple", upload_url: "https://cos.example/simple" } } }),
+    file_commit_upload: () => ({ code: 0, data: { entry: { id: "e-simple" } } }),
+    put: () => ({ status: 200 }),
+  });
+  const svc = freshService(f);
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.uploadFile({ parentId: "p", fileName: "a.txt", contentBase64: "aGk=" }));
+  assert.equal(r.ok, true, `应当成功: ${JSON.stringify(r.error)}`);
+  const putCall = f.calls.find((x) => x.method === "PUT");
+  assert.equal(putCall.url, "https://cos.example/simple");
 });
 
 console.log("\n=== MANIFEST 契约 ===");

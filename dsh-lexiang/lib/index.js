@@ -651,15 +651,38 @@ export class LexiangService extends TypertRemoteService {
       const applied = await client.json("file_apply_upload", applyArgs);
       const session = (applied && applied.session) || applied || {};
       const sessionId = session.session_id || session.sessionId;
-      const uploadUrl = session.upload_url || session.uploadUrl;
+
+      /*
+       * The presigned URL lives in `session.objects[0]`, NOT on `session`.
+       * lexiang-files/SKILL.md documents a simplified
+       * `session: { session_id, upload_url }`, but the service actually returns:
+       *
+       *   { session: { type, session_id,
+       *                objects: [ { key, mime_type, upload_url } ] } }
+       *
+       * Reading `session.upload_url` yielded undefined, so the upload aborted
+       * with "申请上传凭证失败：缺少 session_id 或 upload_url" even though the
+       * apply call had already succeeded. Accept both shapes.
+       */
+      const objects = Array.isArray(session.objects) ? session.objects : [];
+      const first = objects[0] || {};
+      const uploadUrl =
+        first.upload_url || first.uploadUrl || session.upload_url || session.uploadUrl;
       if (!sessionId || !uploadUrl) {
-        throw new LexiangError(LX_ERR.PROTOCOL, "申请上传凭证失败：缺少 session_id 或 upload_url");
+        throw new LexiangError(
+          LX_ERR.PROTOCOL,
+          "申请上传凭证失败：缺少 session_id 或 upload_url",
+          `session 键: ${Object.keys(session).join(",")}`,
+        );
       }
 
       // Step 2: the presigned PUT is a plain HTTP request, not an MCP call.
+      // The signature covers content-length and content-type
+      // (X-Amz-SignedHeaders=content-length;content-type;host), so both must match
+      // what the apply call declared.
       const putRes = await (this.fetchImpl || globalThis.fetch)(uploadUrl, {
         method: "PUT",
-        headers: { "Content-Type": type },
+        headers: { "Content-Type": type, "Content-Length": String(buf.length) },
         body: buf,
       });
       if (!putRes.ok) {
