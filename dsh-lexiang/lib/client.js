@@ -1028,7 +1028,17 @@ window.__ModuleLoader__.load({
 			const mount = ctx.remote.$mount(CONTRIBUTION);
 
 			/**
-			 * 调远程方法。host 半返回 `{ok, data|error}`，这里解包成 data 或抛错。
+			 * 调远程方法。
+			 *
+			 * **信封由网关提供，不是 host 提供的。** dsh-api-gateway 的 invokeRpc()
+			 * 把 host 的返回值包成 `{ ok: true, value }`，把 host 抛出的异常包成
+			 * `{ ok: false, error: { code, message, details } }`。所以这里必须读
+			 * `result.value`。
+			 *
+			 * 早先读的是 `result.data`（host 自己又套了一层信封），于是每次调用都拿到
+			 * undefined —— 面板看起来像连不上 host，其实每个方法都跑成功了。
+			 * dsh-skill-url 读的就是 `result.value`。
+			 *
 			 * 绝不在挂载阶段同步调用（踩坑 4）。
 			 */
 			const callRemote = async (method, args) => {
@@ -1038,18 +1048,20 @@ window.__ModuleLoader__.load({
 					throw new Error("lexiang 服务不可用（host 半可能未加载）");
 				}
 				const result = await remote[method](args);
-				// 诊断：把网关的原始返回报给 host 落盘。`result.data` 意外为空时，
-				// 只有这里能看出到底是网关剥掉了 data、还是 data 里字段被 schema 吃掉。
+				// 诊断：记录网关信封的真实形状，用来区分「读错字段」和「数据被 schema 剥掉」。
 				if (method === "getSettings" || method === "saveSettings") {
 					try {
 						await remote.debugLog({
 							phase: "rawResult",
 							method,
-							resultType: typeof result,
 							resultKeys: result && typeof result === "object" ? Object.keys(result) : [],
-							raw: JSON.stringify(result === undefined ? "undefined" : result).slice(0, 700),
-							dataKeys: result && result.data && typeof result.data === "object" ? Object.keys(result.data) : [],
-							dataRaw: JSON.stringify(result && result.data === undefined ? "undefined" : result && result.data).slice(0, 400)
+							ok: result && result.ok,
+							hasValue: Boolean(result && "value" in result),
+							hasData: Boolean(result && "data" in result),
+							valueKeys:
+								result && result.value && typeof result.value === "object" ? Object.keys(result.value) : [],
+							valueRaw: JSON.stringify(result && result.value === undefined ? "undefined" : result && result.value).slice(0, 400),
+							error: result && result.error ? JSON.stringify(result.error).slice(0, 300) : ""
 						});
 					} catch { /* 诊断失败不影响主流程 */ }
 				}
@@ -1057,7 +1069,7 @@ window.__ModuleLoader__.load({
 					const e = (result && result.error) || {};
 					throw new Error(`${e.code || "ERROR"}: ${e.message || "远程调用失败"}`);
 				}
-				return result.data;
+				return result.value;
 			};
 
 			const face = () => ({

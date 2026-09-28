@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Offline tests for the host service (no network, temp state file).
  * Run: node test/host.test.mjs
  */
@@ -26,6 +26,29 @@ async function t(name, fn) {
 }
 
 const tmpFile = path.join(os.tmpdir(), `dsh-lexiang-test-${process.pid}.json`);
+/**
+ * Simulate the API gateway's envelope, which is exactly where this plugin went
+ * wrong. dsh-api-gateway's invokeRpc() wraps a Host method's return value as
+ * `{ ok: true, value }` and a thrown error as `{ ok: false, error }`. The plugin
+ * must therefore return RAW values and throw — it must not build its own
+ * envelope. Routing every call through these helpers means the tests assert the
+ * real wire shape.
+ */
+function captureSync(fn) {
+  try {
+    return { ok: true, value: fn() };
+  } catch (err) {
+    return { ok: false, error: { code: (err && err.code) || "gateway/internal", message: (err && err.message) || String(err) } };
+  }
+}
+async function captureAsync(fn) {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (err) {
+    return { ok: false, error: { code: (err && err.code) || "gateway/internal", message: (err && err.message) || String(err) } };
+  }
+}
+
 function freshService(fetchImpl) {
   try { fs.unlinkSync(tmpFile); } catch {}
   // NOTE the constructor signature: cordis passes the plugin context as the
@@ -124,31 +147,31 @@ await t("rememberSpace 上限为 MAX_RECENT", () => {
 console.log("\n=== settings ===");
 await t("未配置时 getSettings.configured 为 false", () => {
   const svc = freshService();
-  assert.equal(svc.getSettings().data.configured, false);
+  assert.equal(captureSync(() => svc.getSettings()).value.configured, false);
 });
 await t("saveSettings 持久化并标记 configured", () => {
   const svc = freshService();
-  const r = svc.saveSettings({ companyFrom: "cf1", token: "tk1" });
+  const r = captureSync(() => svc.saveSettings({ companyFrom: "cf1", token: "tk1" }));
   assert.equal(r.ok, true);
-  assert.equal(r.data.configured, true);
+  assert.equal(r.value.configured, true);
   assert.equal(loadState(tmpFile).companyFrom, "cf1");
 });
 await t("saveSettings 不回传明文 token", () => {
   const svc = freshService();
-  const r = svc.saveSettings({ companyFrom: "cf", token: "lxmcp_supersecret_abcdefghij" });
+  const r = captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "lxmcp_supersecret_abcdefghij" }));
   assert.ok(!JSON.stringify(r).includes("supersecret"));
 });
 await t("clearSettings 清空", () => {
   const svc = freshService();
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  svc.clearSettings();
-  assert.equal(svc.getSettings().data.configured, false);
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  captureSync(() => svc.clearSettings());
+  assert.equal(captureSync(() => svc.getSettings()).value.configured, false);
 });
 
 console.log("\n=== 未配置时的门禁 ===");
 await t("未配置调用 listSpaces 返回 NO_CREDENTIALS", async () => {
   const svc = freshService();
-  const r = await svc.listSpaces({});
+  const r = await captureAsync(() => svc.listSpaces({}));
   assert.equal(r.ok, false);
   assert.equal(r.error.code, LX_ERR.NO_CREDENTIALS);
 });
@@ -159,26 +182,26 @@ await t("testConnection 返回身份信息", async () => {
     whoami: () => ({ code: 0, data: { staff: { display_name: "Alice", id: "s1" }, company: { name: "ACME", code: "cf" } } }),
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.testConnection();
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.testConnection());
   assert.equal(r.ok, true);
-  assert.equal(r.data.staffName, "Alice");
-  assert.equal(r.data.companyName, "ACME");
+  assert.equal(r.value.staffName, "Alice");
+  assert.equal(r.value.companyName, "ACME");
 });
 await t("testConnection 401 时返回 AUTH", async () => {
   const f = async () => ({ status: 401, ok: false, headers: { get: () => null }, text: async () => "no" });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "bad" });
-  const r = await svc.testConnection();
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "bad" }));
+  const r = await captureAsync(() => svc.testConnection());
   assert.equal(r.ok, false);
   assert.equal(r.error.code, LX_ERR.AUTH);
 });
 await t("listTeams 映射字段", async () => {
   const f = routedFetch({ team_list_teams: () => ({ code: 0, data: { teams: [{ id: "t1", name: "团队A", code: "k1" }] } }) });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.listTeams();
-  assert.equal(r.data.teams[0].name, "团队A");
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.listTeams());
+  assert.equal(r.value.teams[0].name, "团队A");
 });
 await t("listChildren 映射并暴露 hasChildren", async () => {
   const f = routedFetch({
@@ -188,15 +211,15 @@ await t("listChildren 映射并暴露 hasChildren", async () => {
     }),
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.listChildren({ parentId: "root" });
-  assert.equal(r.data.entries.length, 2);
-  assert.equal(r.data.entries[1].hasChildren, true);
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.listChildren({ parentId: "root" }));
+  assert.equal(r.value.entries.length, 2);
+  assert.equal(r.value.entries[1].hasChildren, true);
 });
 await t("listChildren 缺 parentId 报错", async () => {
   const svc = freshService(routedFetch({}));
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.listChildren({});
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.listChildren({}));
   assert.equal(r.ok, false);
   assert.equal(r.error.code, LX_ERR.PROTOCOL);
 });
@@ -205,11 +228,11 @@ await t("search keyword 模式解析 docs", async () => {
     search_kb_search: () => ({ code: 0, data: { total: 30, docs: [{ id: "d1", title: "T", content: "正文片段" }] } }),
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.search({ query: "桥梁", mode: "keyword" });
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.search({ query: "桥梁", mode: "keyword" }));
   assert.equal(r.ok, true);
-  assert.equal(r.data.total, 30);
-  assert.equal(r.data.hits[0].snippet, "正文片段");
+  assert.equal(r.value.total, 30);
+  assert.equal(r.value.hits[0].snippet, "正文片段");
 });
 await t("search semantic 模式用 filters.keyword", async () => {
   let seen = null;
@@ -220,17 +243,17 @@ await t("search semantic 模式用 filters.keyword", async () => {
     },
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.search({ query: "函数", mode: "semantic", spaceId: "sp" });
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.search({ query: "函数", mode: "semantic", spaceId: "sp" }));
   assert.equal(r.ok, true);
   assert.equal(seen.filters.keyword, "函数");
   assert.equal(seen.space_id, "sp");
-  assert.equal(r.data.hits[0].score, 1.5);
+  assert.equal(r.value.hits[0].score, 1.5);
 });
 await t("search 空 query 报错", async () => {
   const svc = freshService(routedFetch({}));
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.search({ query: "  " });
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.search({ query: "  " }));
   assert.equal(r.ok, false);
 });
 await t("createEntry 建页面", async () => {
@@ -242,9 +265,9 @@ await t("createEntry 建页面", async () => {
     },
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.createEntry({ parentId: "p", name: "新页" });
-  assert.equal(r.data.id, "new1");
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.createEntry({ parentId: "p", name: "新页" }));
+  assert.equal(r.value.id, "new1");
   assert.equal(seen.entry_type, "page");
   assert.equal(seen.parent_entry_id, "p");
 });
@@ -257,9 +280,9 @@ await t("removeEntry 用 force_expire", async () => {
     },
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.removeEntry({ entryId: "e9" });
-  assert.equal(r.data.removed, true);
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.removeEntry({ entryId: "e9" }));
+  assert.equal(r.value.removed, true);
   assert.equal(seen.validity_type, "force_expire");
 });
 await t("renameEntry 传 entry_id + name", async () => {
@@ -268,9 +291,9 @@ await t("renameEntry 传 entry_id + name", async () => {
     entry_rename_entry: (body) => { seen = body.params.arguments.arguments; return { code: 0, data: {} }; },
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.renameEntry({ entryId: "e1", name: "改名" });
-  assert.equal(r.data.name, "改名");
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.renameEntry({ entryId: "e1", name: "改名" }));
+  assert.equal(r.value.name, "改名");
   assert.equal(seen.entry_id, "e1");
 });
 
@@ -282,10 +305,10 @@ await t("uploadFile 走 apply -> PUT -> commit", async () => {
     put: () => ({ status: 200 }),
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.uploadFile({ parentId: "p", fileName: "a.pdf", contentBase64: Buffer.from("hello").toString("base64") });
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.uploadFile({ parentId: "p", fileName: "a.pdf", contentBase64: Buffer.from("hello").toString("base64") }));
   assert.equal(r.ok, true);
-  assert.equal(r.data.id, "file1");
+  assert.equal(r.value.id, "file1");
   const putCall = f.calls.find((c) => c.method === "PUT");
   assert.ok(putCall, "应当发出 PUT 请求");
   assert.equal(putCall.url, "https://cos.example/put");
@@ -296,15 +319,15 @@ await t("uploadFile PUT 失败时报 NETWORK", async () => {
     put: () => ({ status: 403 }),
   });
   const svc = freshService(f);
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.uploadFile({ parentId: "p", fileName: "a.pdf", contentBase64: "aGk=" });
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.uploadFile({ parentId: "p", fileName: "a.pdf", contentBase64: "aGk=" }));
   assert.equal(r.ok, false);
   assert.equal(r.error.code, LX_ERR.NETWORK);
 });
 await t("uploadFile 缺 fileName 报错", async () => {
   const svc = freshService(routedFetch({}));
-  svc.saveSettings({ companyFrom: "cf", token: "tk" });
-  const r = await svc.uploadFile({ parentId: "p", contentBase64: "aGk=" });
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  const r = await captureAsync(() => svc.uploadFile({ parentId: "p", contentBase64: "aGk=" }));
   assert.equal(r.ok, false);
 });
 

@@ -32,7 +32,7 @@
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { z } from "zod";
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -85,16 +85,28 @@ export const name = "lexiang";
  */
 export const inject = ["typert"];
 
-/** Shape of every remote reply: { ok, data?, error? }. */
-const ok = (data) => ({ ok: true, data: data === undefined ? null : data });
-const fail = (err) => ({
-  ok: false,
-  error: {
-    code: (err && err.code) || LX_ERR.UPSTREAM,
-    message: (err && err.message) || String(err),
-    detail: (err && err.detail) || "",
-  },
-});
+/**
+ * Wire result convention — the gateway owns the envelope, NOT the plugin.
+ *
+ * dsh-api-gateway's invokeRpc() wraps whatever a Host method returns:
+ *     { ok: true, value: <returned value> }
+ * and converts a thrown error into:
+ *     { ok: false, error: { code, message, details } }
+ *
+ * So a Host method must return the RAW value and **throw** on failure. An earlier
+ * version returned its own `{ok, data}` / `{ok, error}` envelope, which the
+ * gateway then nested inside `value`; the client read `.data`, got undefined on
+ * every call, and the panel behaved as if the host were dead even though every
+ * method ran correctly. dsh-skill-url returns raw values and throws — that is why
+ * it works.
+ *
+ * Keeping the two helpers means every existing `return ok(x)` / `return fail(e)`
+ * call site keeps reading naturally while producing the correct wire shape.
+ */
+const ok = (data) => (data === undefined ? null : data);
+const fail = (err) => {
+  throw err;
+};
 
 /**
  * Typert strict codec.
@@ -523,16 +535,24 @@ export class LexiangService extends TypertRemoteService {
 
   /**
    * Diagnostic sink. The renderer has no filesystem access, so the panel sends
-   * whatever it needs inspected here and the host writes it to disk. Used to
-   * learn exactly which props DSH passes to a settings section.
+   * whatever it needs inspected here and the host writes it to disk.
+   *
+   * Appends (newest last) and keeps the file bounded. It used to overwrite, so
+   * the render beacon — which fires on every render — clobbered the interesting
+   * entries before they could be read.
    */
   debugLog(payload) {
     try {
-      writeFileSync(
-        join(homedir(), ".dsh", "dsh-lexiang.debug.json"),
-        `${JSON.stringify({ at: new Date().toISOString(), payload }, null, 2)}\n`,
-        "utf8",
-      );
+      const file = join(homedir(), ".dsh", "dsh-lexiang.debug.json");
+      let lines = [];
+      try {
+        lines = readFileSync(file, "utf8").split("\n").filter((l) => l.trim().length > 0);
+      } catch {
+        /* first write */
+      }
+      lines.push(JSON.stringify({ at: new Date().toISOString(), payload }));
+      if (lines.length > 400) lines = lines.slice(lines.length - 400);
+      writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
       return ok({ written: true });
     } catch (err) {
       return fail(err);
