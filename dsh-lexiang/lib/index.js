@@ -30,6 +30,7 @@
  * this specifier to a local stub (see package.json "test").
  */
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { z } from "zod";
 
 import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -95,14 +96,25 @@ const fail = (err) => ({
   },
 });
 
-/** Typert strict codec: the loader requires a `create` factory. */
-const codec = (typeSymbol) => ({ mode: "strict", typeSymbol, create: () => anyObject });
-
-/** Minimal permissive schema — the panel validates before sending. */
-const anyObject = {
-  parse: (v) => (v && typeof v === "object" ? v : {}),
-  safeParse: (v) => ({ success: true, data: v }),
-};
+/**
+ * Typert strict codec.
+ *
+ * MUST use a real zod schema, exactly like dsh-skill-url:
+ *     import { z } from "zod";
+ *     const codec = (typeSymbol, schema) => ({ mode: "strict", typeSymbol, create: () => schema });
+ *
+ * The gateway calls `codec.create().parse(value)` at the boundary. An earlier
+ * version passed a hand-written `{ parse, safeParse }` stand-in instead. That is
+ * not a zod type, so the schema carries no field information: `z.object({})`
+ * strips every unknown key, and the value the panel received had lost all of its
+ * fields (`companyFrom=undefined`) even though the host had returned them.
+ *
+ * `z.looseObject({})` keeps unknown keys, which is what a permissive pass-through
+ * needs. The panel validates its own input before sending, so nothing stricter is
+ * required here.
+ */
+const permissive = z.looseObject({});
+const codec = (typeSymbol) => ({ mode: "strict", typeSymbol, create: () => permissive });
 
 /**
  * One invocation per remote method. Each takes a single optional JSON object

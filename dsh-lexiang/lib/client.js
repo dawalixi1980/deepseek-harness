@@ -1038,6 +1038,21 @@ window.__ModuleLoader__.load({
 					throw new Error("lexiang 服务不可用（host 半可能未加载）");
 				}
 				const result = await remote[method](args);
+				// 诊断：把网关的原始返回报给 host 落盘。`result.data` 意外为空时，
+				// 只有这里能看出到底是网关剥掉了 data、还是 data 里字段被 schema 吃掉。
+				if (method === "getSettings" || method === "saveSettings") {
+					try {
+						await remote.debugLog({
+							phase: "rawResult",
+							method,
+							resultType: typeof result,
+							resultKeys: result && typeof result === "object" ? Object.keys(result) : [],
+							raw: JSON.stringify(result === undefined ? "undefined" : result).slice(0, 700),
+							dataKeys: result && result.data && typeof result.data === "object" ? Object.keys(result.data) : [],
+							dataRaw: JSON.stringify(result && result.data === undefined ? "undefined" : result && result.data).slice(0, 400)
+						});
+					} catch { /* 诊断失败不影响主流程 */ }
+				}
 				if (!result || result.ok !== true) {
 					const e = (result && result.error) || {};
 					throw new Error(`${e.code || "ERROR"}: ${e.message || "远程调用失败"}`);

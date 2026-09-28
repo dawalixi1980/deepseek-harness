@@ -427,6 +427,32 @@ await t("apply 是唯一的插件入口且为函数", async () => {
   assert.equal(typeof mod.apply, "function", "apply 必须是函数");
   assert.equal(typeof mod.name, "string", "name 必须是字符串");
 });
+// strict codec 必须是**真 zod schema**。网关在边界上调用
+// `codec.create().parse(value)`；早先用的是手写替身 {parse,safeParse}，它不是
+// zod 类型、不带任何字段信息，于是 `z.object({})` 会把所有未知键剥光 ——
+// 面板收到的 getSettings 结果里 companyFrom 变成 undefined，尽管 host 返回正常。
+// dsh-skill-url 用的就是真 zod，这里必须一致。
+await t("strict codec 用真 zod schema（假替身会被网关剥掉字段）", async () => {
+  const mod = await import("../lib/index.js");
+  const sample = { companyFrom: "abc", hasToken: true, tokenMasked: "x", configured: true, extra: 1 };
+  for (const inv of mod.MANIFEST.invocations) {
+    for (const [label, schema] of [
+      ["result", inv.result.create()],
+      ["args", inv.parameters[0].codec.create()],
+    ]) {
+      // 必须是真正的 zod 类型。手写的 {parse,safeParse} 替身能通过 .parse 断言，
+      // 却带不了字段信息，正是它在边界上把结果剥空的。
+      assert.ok(
+        schema && (schema._zod !== undefined || schema._def !== undefined),
+        `${inv.method} 的 ${label} codec 不是真 zod 类型（constructor=${schema && schema.constructor && schema.constructor.name}）`,
+      );
+      assert.equal(typeof schema.parse, "function", `${inv.method} 的 ${label} schema 不可 parse`);
+      const parsed = schema.parse(sample);
+      assert.equal(parsed.companyFrom, "abc", `${inv.method} 的 ${label} schema 丢了 companyFrom`);
+      assert.equal(parsed.extra, 1, `${inv.method} 的 ${label} schema 丢了未知键（不是 loose 类型）`);
+    }
+  }
+});
 
 try { fs.unlinkSync(tmpFile); } catch {}
 console.log(`\n${fail === 0 ? "全部通过" : "有失败"}：${pass} passed, ${fail} failed\n`);
