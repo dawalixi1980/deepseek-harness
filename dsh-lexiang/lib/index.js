@@ -86,6 +86,54 @@ export const name = "lexiang";
 export const inject = ["typert"];
 
 /**
+ * MIME type from a filename extension.
+ *
+ * `file_apply_upload` requires `mime_type`. The panel sends `File.type`, but
+ * browsers leave it empty for some extensions (and the offline tests do not have
+ * a browser at all), so fall back to the extension and finally to
+ * application/octet-stream. Mirrors getMimeType() in
+ * lexiang-files/scripts/sync-folder.ts.
+ */
+const MIME_TYPES = {
+  ".md": "text/markdown",
+  ".markdown": "text/markdown",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+  ".json": "application/json",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".bmp": "image/bmp",
+  ".zip": "application/zip",
+  ".gz": "application/gzip",
+  ".tar": "application/x-tar",
+  ".7z": "application/x-7z-compressed",
+  ".rar": "application/vnd.rar",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+};
+
+function guessMimeType(fileName) {
+  const name = String(fileName || "");
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return "application/octet-stream";
+  return MIME_TYPES[name.slice(dot).toLowerCase()] || "application/octet-stream";
+}
+
+/**
  * Wire result convention — the gateway owns the envelope, NOT the plugin.
  *
  * dsh-api-gateway's invokeRpc() wraps whatever a Host method returns:
@@ -573,15 +621,35 @@ export class LexiangService extends TypertRemoteService {
       if (!contentBase64) throw new LexiangError(LX_ERR.PROTOCOL, "文件内容为空");
       const { client } = this._require();
 
+      const buf = Buffer.from(contentBase64, "base64");
+      if (buf.length === 0) throw new LexiangError(LX_ERR.PROTOCOL, "文件内容为空");
+      const type = mimeType || guessMimeType(fileName);
+
+      /*
+       * Contract, per lexiang-files/SKILL.md and scripts/sync-folder.ts:
+       *
+       *   file_apply_upload {
+       *     parent_entry_id, name, size, mime_type, upload_type: "PRE_SIGNED_URL"
+       *   }
+       *   -> { session: { session_id, upload_url } }
+       *
+       * An earlier version sent `file_name` and omitted `size` and `mime_type`,
+       * which the service rejects outright:
+       *   code 51 validate proto message: name / size / mime_type value is required
+       * The buffer therefore has to be decoded BEFORE applying, because `size`
+       * must be the byte length.
+       */
       const applyArgs = {
-        upload_type: "PRE_SIGNED_URL",
         parent_entry_id: parentId,
-        file_name: fileName,
+        name: fileName,
+        size: buf.length,
+        mime_type: type,
+        upload_type: "PRE_SIGNED_URL",
       };
       if (fileId) applyArgs.file_id = fileId;
 
       const applied = await client.json("file_apply_upload", applyArgs);
-      const session = applied.session || applied;
+      const session = (applied && applied.session) || applied || {};
       const sessionId = session.session_id || session.sessionId;
       const uploadUrl = session.upload_url || session.uploadUrl;
       if (!sessionId || !uploadUrl) {
@@ -589,10 +657,9 @@ export class LexiangService extends TypertRemoteService {
       }
 
       // Step 2: the presigned PUT is a plain HTTP request, not an MCP call.
-      const buf = Buffer.from(contentBase64, "base64");
       const putRes = await (this.fetchImpl || globalThis.fetch)(uploadUrl, {
         method: "PUT",
-        headers: mimeType ? { "Content-Type": mimeType } : undefined,
+        headers: { "Content-Type": type },
         body: buf,
       });
       if (!putRes.ok) {
@@ -607,7 +674,7 @@ export class LexiangService extends TypertRemoteService {
       const committed = await client.json("file_commit_upload", { session_id: sessionId });
       const entry = (committed && committed.entry) || committed || {};
       return ok({
-        id: entry.id || "",
+        id: entry.id || entry.entry_id || "",
         name: entry.name || fileName,
         sessionId,
         bytes: buf.length,

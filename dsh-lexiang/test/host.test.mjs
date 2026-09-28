@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Offline tests for the host service (no network, temp state file).
  * Run: node test/host.test.mjs
  */
@@ -71,7 +71,13 @@ function routedFetch(routes) {
     const isPut = Boolean(init && init.method === "PUT");
     // presigned PUT carries raw bytes, never JSON — handle it before parsing.
     if (isPut) {
-      calls.push({ url, method: "PUT", body: null });
+      calls.push({
+        url,
+        method: "PUT",
+        body: null,
+        headers: (init && init.headers) || {},
+        bytes: init && init.body && init.body.length ? init.body.length : 0,
+      });
       const r = routes.put ? routes.put(url, init) : { status: 200 };
       return { ok: r.status === 200, status: r.status, headers: { get: () => null }, text: async () => "" };
     }
@@ -306,12 +312,58 @@ await t("uploadFile 走 apply -> PUT -> commit", async () => {
   });
   const svc = freshService(f);
   captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
-  const r = await captureAsync(() => svc.uploadFile({ parentId: "p", fileName: "a.pdf", contentBase64: Buffer.from("hello").toString("base64") }));
+  const bytes = Buffer.from("hello");
+  const r = await captureAsync(() => svc.uploadFile({ parentId: "p", fileName: "a.pdf", contentBase64: bytes.toString("base64") }));
   assert.equal(r.ok, true);
   assert.equal(r.value.id, "file1");
+  assert.equal(r.value.bytes, bytes.length);
+
+  // file_apply_upload 的参数契约（lexiang-files/SKILL.md + sync-folder.ts）。
+  // 这里曾经发的是 file_name 且没有 size/mime_type，服务端直接以
+  // "code 51: name/size/mime_type value is required" 拒绝 —— 断言必须锁死字段名。
+  const applyArgs = () => {
+    const c = f.calls.find(
+      (x) => x.body && x.body.params && x.body.params.arguments && x.body.params.arguments.tool_name === "file_apply_upload",
+    );
+    assert.ok(c, "应当调用 file_apply_upload");
+    return c.body.params.arguments.arguments;
+  };
+  const a = applyArgs();
+  assert.equal(a.parent_entry_id, "p", "parent_entry_id 必填");
+  assert.equal(a.name, "a.pdf", "字段名必须是 name（不是 file_name）");
+  assert.equal(a.file_name, undefined, "不应再出现 file_name");
+  assert.equal(a.size, bytes.length, "size 必须是字节数");
+  assert.equal(a.mime_type, "application/pdf", "mime_type 必填");
+  assert.equal(a.upload_type, "PRE_SIGNED_URL");
+
   const putCall = f.calls.find((c) => c.method === "PUT");
   assert.ok(putCall, "应当发出 PUT 请求");
   assert.equal(putCall.url, "https://cos.example/put");
+  assert.equal(putCall.headers["Content-Type"], "application/pdf", "PUT 必须带 Content-Type");
+  assert.equal(putCall.bytes, bytes.length, "PUT 必须带上文件字节");
+
+  const commit = f.calls.find(
+    (c) => c.body && c.body.params && c.body.params.arguments && c.body.params.arguments.tool_name === "file_commit_upload",
+  );
+  assert.ok(commit, "应当调用 file_commit_upload");
+  assert.equal(commit.body.params.arguments.arguments.session_id, "S1");
+});
+await t("uploadFile 未传 mimeType 时按扩展名推断", async () => {
+  const f = routedFetch({
+    file_apply_upload: () => ({ code: 0, data: { session: { session_id: "S1", upload_url: "https://cos.example/put" } } }),
+    file_commit_upload: () => ({ code: 0, data: { entry: { id: "x" } } }),
+    put: () => ({ status: 200 }),
+  });
+  const svc = freshService(f);
+  captureSync(() => svc.saveSettings({ companyFrom: "cf", token: "tk" }));
+  await captureAsync(() => svc.uploadFile({ parentId: "p", fileName: "报告.docx", contentBase64: "aGk=" }));
+  const c = f.calls.find(
+    (x) => x.body && x.body.params && x.body.params.arguments && x.body.params.arguments.tool_name === "file_apply_upload",
+  );
+  const want = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  assert.equal(c.body.params.arguments.arguments.mime_type, want);
+  const putCall = f.calls.find((x) => x.method === "PUT");
+  assert.equal(putCall.headers["Content-Type"], want);
 });
 await t("uploadFile PUT 失败时报 NETWORK", async () => {
   const f = routedFetch({
