@@ -663,6 +663,10 @@ export function apply(ctx) {
     }
     // 诊断：把客户端每次调用记到一行日志。用来区分「client 没发请求」和
     // 「client 发了但渲染有问题」——面板空白时这俩原因看起来一模一样。
+    //
+    // 只记方法名，**绝不记参数**：saveSettings 的参数里带着明文 token，
+    // 早先的版本把参数一起写进了日志，等于在磁盘上留了一份凭证副本。
+    // 需要看参数形状时用 debugLog（它只收调用方主动送来的、已脱敏的字段）。
     try {
       const logPath = join(homedir(), ".dsh", "dsh-lexiang.calls.log");
       for (const m of METHODS) {
@@ -671,7 +675,7 @@ export function apply(ctx) {
           try {
             writeFileSync(
               logPath,
-              `${new Date().toISOString()} ${m} ${JSON.stringify(a && a[0] ? a[0] : null)}\n`,
+              `${new Date().toISOString()} ${m}\n`,
               { encoding: "utf8", flag: "a" },
             );
           } catch {

@@ -499,6 +499,20 @@ window.__ModuleLoader__.load({
 				if (r) setHits(r);
 			};
 
+			/**
+			 * 保存后**重新拉取真实状态**，而不是依赖 saveSettings 的返回值。
+			 *
+			 * 之前的写法是 `if (r) { setSettings(r); say(...) }`：只要返回值是假值
+			 * （result.data 为 undefined、或响应被网关改形），setSettings 和成功
+			 * 提示就一起被跳过 —— 界面看起来就是「点了保存没反应」，尽管 host 其实
+			 * 已经落盘成功。现在不管返回值长什么样，都以 getSettings 为准。
+			 */
+			const refresh = async () => {
+				const s = await guard("刷新凭证", () => face.getSettings());
+				if (s && typeof s === "object") setSettings((prev) => ({ ...prev, ...s }));
+				return s;
+			};
+
 			const doSave = async () => {
 				const r = await guard("保存凭证", () =>
 					face.saveSettings({
@@ -507,29 +521,31 @@ window.__ModuleLoader__.load({
 						endpoint: form.endpoint
 					})
 				);
-				if (r) {
-					setSettings(r);
-					setForm((f) => ({ ...f, token: "" }));
-					say("ok", t("saved"));
-				}
+				// r 只用来判断「有没有抛错」（guard 抛错时返回 null 并已 setMsg）。
+				// 真正的界面状态一律以重新拉取的结果为准。
+				if (r === null) return;
+				setForm((f) => ({ ...f, token: "" }));
+				const s = await refresh();
+				if (s && s.configured) say("ok", t("saved"));
+				else say("err", `保存后仍未配置：companyFrom=${JSON.stringify(s && s.companyFrom)} hasToken=${Boolean(s && s.hasToken)}`);
 			};
 
 			const doTest = async () => {
 				const r = await guard("测试连接", () => face.testConnection());
-				if (r) say("ok", `${r.staffName} @ ${r.companyName}`);
+				if (r && typeof r === "object") say("ok", `${r.staffName || ""} @ ${r.companyName || ""}`);
+				else if (r !== null) say("err", `测试返回异常：${JSON.stringify(r)}`);
 			};
 
 			const doClear = async () => {
 				const r = await guard("清除凭证", () => face.clearSettings());
-				if (r) {
-					setSettings(r);
-					setSpaces([]);
-					setTree([]);
-					setPicked(null);
-					setBody("");
-					setHits(null);
-					say("info", t("notConfigured"));
-				}
+				if (r === null) return;
+				setSpaces([]);
+				setTree([]);
+				setPicked(null);
+				setBody("");
+				setHits(null);
+				await refresh();
+				say("info", t("notConfigured"));
 			};
 
 			const doCreate = async (type) => {
@@ -639,6 +655,7 @@ window.__ModuleLoader__.load({
 							configured: !!(settings && settings.configured),
 							fatal: fatal || "",
 							busy: busy || "",
+							msg: msg ? `${msg.kind}:${msg.text}` : "",
 							dom
 						}).catch(() => {});
 					}
