@@ -58,7 +58,11 @@ window.__ModuleLoader__.load({
 			".PU_chipText{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;cursor:pointer;background:0 0;border:0;padding:0;font-family:inherit;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
 			".PU_chipText:hover{color:var(--dsw-alias-state-business-primary)}",
 			".PU_chipDel{color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:16px;cursor:pointer;background:0 0;border:0;padding:0 2px;font-family:inherit}",
-			".PU_chipDel:hover{color:var(--dsw-alias-state-error-primary)}"
+			".PU_chipDel:hover{color:var(--dsw-alias-state-error-primary)}",
+			".PU_lines{margin:0;padding:0;list-style:none;display:grid}",
+			".PU_line{align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--dsw-alias-border-l2);display:flex;font-size:12px}",
+			".PU_line:last-child{border-bottom:0}",
+			".PU_lineText{flex:1;min-width:0;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
 		].join("");
 
 		const styleId = "dsh-plugin-url-style";
@@ -75,7 +79,8 @@ window.__ModuleLoader__.load({
 			cardMain: "PU_cardMain", cardTitle: "PU_cardTitle", name: "PU_name", ver: "PU_ver",
 			path: "PU_path", desc: "PU_desc", side: "PU_side", empty: "PU_empty", spin: "PU_spin",
 			savedRow: "PU_savedRow", savedLabel: "PU_savedLabel", chip: "PU_chip",
-			chipText: "PU_chipText", chipDel: "PU_chipDel"
+			chipText: "PU_chipText", chipDel: "PU_chipDel",
+			lines: "PU_lines", line: "PU_line", lineText: "PU_lineText"
 		};
 
 		// ── 文案 ──────────────────────────────────────────────────────────
@@ -139,12 +144,21 @@ window.__ModuleLoader__.load({
 			communityNoToken: "未认证检索，GitHub 限制 10 次/分钟；同一次搜索 10 分钟内走缓存。",
 			methodTree: "轻量扫描",
 			methodArchive: "整包扫描（回退）",
+			unreadable: "有 {n} 个 package.json 重试后仍然读不到，列表可能不全：{list}",
 			bgTitle: "后台任务",
 			bgRunning: "进行中",
 			bgDone: "已完成",
 			bgFailed: "失败",
 			bgElapsed: "{n} 秒",
-			bgHint: "关掉设置不会中断：任务跑在 host 进程里，重开这一页会自动接上。"
+			bgHint: "关掉设置不会中断：任务跑在 host 进程里，重开这一页会自动接上。",
+			bgIdle: "空闲",
+			bgRunningCount: "{n} 个进行中",
+			bgCancel: "取消",
+			bgCancelling: "取消中…",
+			bgCancelled: "已取消",
+			bgFinished: "最近完成 {n} 条",
+			bgShow: "展开",
+			bgHide: "收起"
 		};
 		const en = {
 			nav: "Install plugins from URL",
@@ -205,12 +219,21 @@ window.__ModuleLoader__.load({
 			communityNoToken: "Unauthenticated search: GitHub allows 10 requests/minute; the same search is cached for 10 minutes.",
 			methodTree: "fast scan",
 			methodArchive: "full archive (fallback)",
+			unreadable: "{n} package.json file(s) could not be read after retries; the list may be incomplete: {list}",
 			bgTitle: "Background tasks",
 			bgRunning: "running",
 			bgDone: "done",
 			bgFailed: "failed",
 			bgElapsed: "{n}s",
-			bgHint: "Closing settings does not stop these: they run in the Host process, and reopening this page picks them up."
+			bgHint: "Closing settings does not stop these: they run in the Host process, and reopening this page picks them up.",
+			bgIdle: "idle",
+			bgRunningCount: "{n} running",
+			bgCancel: "Cancel",
+			bgCancelling: "Cancelling…",
+			bgCancelled: "Cancelled",
+			bgFinished: "{n} finished recently",
+			bgShow: "Show",
+			bgHide: "Hide"
 		};
 
 		/**
@@ -305,6 +328,14 @@ window.__ModuleLoader__.load({
 					invocation: { kind: "direct" },
 					parameters: [],
 					result: codec("dsh-plugin-url#BackgroundStatusResult")
+				},
+				{
+					// 取消一个正在跑的后台任务
+					id: "dsh-plugin-url#pluginUrl/cancelJob",
+					service: "pluginUrl", namespace: "pluginUrl", method: "cancelJob",
+					invocation: { kind: "direct" },
+					parameters: [{ name: "id", wire: "id", source: "json", codec: codec("dsh-plugin-url#JobId") }],
+					result: codec("dsh-plugin-url#CancelJobResult")
 				}
 			]
 		};
@@ -341,8 +372,21 @@ window.__ModuleLoader__.load({
 			 * 以 host 为准，这里只是它的一份投影。
 			 */
 			const [jobs, setJobs] = react.useState([]);
+			/** 已完成的任务默认压成一行，想看细节再展开。 */
+			const [jobsExpanded, setJobsExpanded] = react.useState(false);
 
 			const applySites = (list) => setSites(Array.isArray(list) ? list : []);
+
+			/**
+			 * 统一处理调用失败。
+			 * 「已取消」是用户自己点的，不该显示成红色报错 —— 否则点一次取消会看到
+			 * 一句"操作失败"，像是出错了。
+			 */
+			const reportError = (e) => {
+				const text = String(e?.message ?? e);
+				if (text.includes("已取消")) { setError(""); setNotice(t("bgCancelled")); return; }
+				setError(t("opFailed") + "：" + text);
+			};
 
 			const saveSite = (raw, quiet) => {
 				const text = String(raw ?? "").trim();
@@ -457,7 +501,7 @@ window.__ModuleLoader__.load({
 				setBusy(true); setError(""); setNotice(""); setResult(null);
 				Promise.resolve(face.inspect(text))
 					.then((r) => { setResult(r); refreshLocal(); saveSite(text, true); })
-					.catch((e) => setError(String(e?.message ?? e)))
+					.catch(reportError)
 					.finally(() => setBusy(false));
 			};
 
@@ -477,7 +521,7 @@ window.__ModuleLoader__.load({
 						setCommunity(r);
 						setCommunityPage(r?.page ?? target);
 					})
-					.catch((e) => setError(String(e?.message ?? e)))
+					.catch(reportError)
 					.finally(() => setCommunityBusy(false));
 			};
 
@@ -494,7 +538,7 @@ window.__ModuleLoader__.load({
 				setBusy(true);
 				Promise.resolve(face.inspect(next))
 					.then((r) => { setResult(r); refreshLocal(); saveSite(next, true); })
-					.catch((e) => setError(String(e?.message ?? e)))
+					.catch(reportError)
 					.finally(() => setBusy(false));
 			};
 
@@ -506,7 +550,7 @@ window.__ModuleLoader__.load({
 						setNotice(t("afterInstall").replace("{name}", plugin.name + "@" + r.version));
 						refreshLocal();
 					})
-					.catch((e) => setError(t("opFailed") + "：" + String(e?.message ?? e)))
+					.catch(reportError)
 					.finally(() => setPending((p) => { const n = { ...p }; delete n[plugin.name]; return n; }));
 			};
 
@@ -515,12 +559,30 @@ window.__ModuleLoader__.load({
 				setError(""); setNotice("");
 				Promise.resolve(face.uninstallPlugin(name))
 					.then(() => { setNotice(name + " — " + t("uninstall")); refreshLocal(); })
-					.catch((e) => setError(t("opFailed") + "：" + String(e?.message ?? e)))
+					.catch(reportError)
 					.finally(() => setPending((p) => { const n = { ...p }; delete n[name]; return n; }));
+			};
+
+			/** 取消一个正在跑的后台任务。 */
+			const doCancelJob = (id) => {
+				setPending((p) => ({ ...p, ["job:" + id]: "cancel" }));
+				setError(""); setNotice("");
+				try {
+					if (typeof face?.cancelJob !== "function") return;
+					Promise.resolve(face.cancelJob(id))
+						.then(() => { setNotice(t("bgCancelled")); refreshStatus(); })
+						.catch(reportError)
+						.finally(() => setPending((p) => { const n = { ...p }; delete n["job:" + id]; return n; }));
+				} catch (e) {
+					reportError(e);
+				}
 			};
 
 			const localMap = new Map((local ?? []).map((item) => [item.name, item]));
 			const found = result === null ? [] : result.plugins;
+			/** 只有进行中的才占卡片；完成的压成一行。 */
+			const running = jobs.filter((job) => job.phase === "running");
+			const finished = jobs.filter((job) => job.phase !== "running");
 
 			/** 打包就绪度 → 一个标签。 */
 			const readinessTag = (plugin) => {
@@ -584,36 +646,74 @@ window.__ModuleLoader__.load({
 				jsx("p", { className: c.hint, children: t("reloadHint") }),
 
 				// ── 后台任务条 ────────────────────────────────────────────
-				// 面板会被卸载，但 host 的任务不会。这里只是它的一份投影，
-				// 所以关掉设置再回来，卡片还在、还在跑。
+				// 面板会被卸载，但 host 的任务不会。这里只是它的一份投影。
+				//
+				// 布局刻意收窄：**只有「进行中」才占一张卡片**，完成的一律压成一行
+				// （想看细节再展开）。否则反复重开面板扫同一个仓库，会堆一屏一模一样
+				// 的「扫描完成」——那正是之前"太繁杂"的来源。
 				jobs.length === 0
 					? null
 					: jsx("div", { children: [
 						jsx("div", { className: c.groupHead, children: [
 							jsx("span", { className: c.groupLabel, children: t("bgTitle") }),
-							jsx("span", { className: c.count, children: String(jobs.length) })
+							jsx("span", { className: c.count, children: running.length > 0
+								? t("bgRunningCount").replace("{n}", String(running.length))
+								: t("bgIdle") })
 						] }),
-						jsx("p", { className: c.hint, children: t("bgHint") }),
-						jsx("ul", { className: c.cards, children: jobs.map((job) => {
-							const elapsed = Math.max(0, Math.round(((job.endedAt > 0 ? job.endedAt : Date.now()) - job.startedAt) / 1000));
-							const label = job.phase === "running"
-								? t("bgRunning")
-								: (job.phase === "failed" ? t("bgFailed") : t("bgDone"));
-							return jsx("li", { key: job.id, className: c.card, children: [
-								jsx("div", { className: c.cardMain, children: [
-									jsx("div", { className: c.cardTitle, children: [
-										jsx("span", { className: c.name, children: job.summary }),
-										jsx("span", {
-											className: c.tag,
-											"data-kind": job.phase === "running" ? "src" : (job.phase === "failed" ? "warn" : undefined),
-											children: label
-										}),
-										jsx("span", { className: c.tag, children: t("bgElapsed").replace("{n}", String(elapsed)) })
+
+						// 进行中：卡片 + 取消
+						running.length === 0
+							? null
+							: jsx("ul", { className: c.cards, children: running.map((job) => {
+								const elapsed = Math.max(0, Math.round((Date.now() - job.startedAt) / 1000));
+								const mark = pending["job:" + job.id];
+								return jsx("li", { key: job.id, className: c.card, children: [
+									jsx("div", { className: c.cardMain, children: [
+										jsx("div", { className: c.cardTitle, children: [
+											jsx("span", { className: c.name, children: job.summary }),
+											jsx("span", { className: c.tag, "data-kind": "src", children: t("bgRunning") }),
+											jsx("span", { className: c.tag, children: t("bgElapsed").replace("{n}", String(elapsed)) })
+										] })
 									] }),
-									job.error.length > 0 ? jsx("p", { className: c.desc, children: job.error }) : null
-								] })
-							] });
-						}) })
+									jsx("div", { className: c.side, children: jsx("button", {
+										className: c.btn,
+										"data-kind": "danger",
+										disabled: mark !== undefined || job.cancellable !== true,
+										onClick: () => doCancelJob(job.id),
+										children: mark === "cancel" ? t("bgCancelling") : t("bgCancel")
+									}) })
+								] });
+							}) }),
+
+						// 已完成：一行摘要 + 展开
+						finished.length === 0
+							? null
+							: jsx("div", { className: c.row, children: [
+								jsx("span", { className: c.count, children: t("bgFinished").replace("{n}", String(finished.length)) }),
+								jsx("button", {
+									className: c.btn,
+									style: { height: "24px", padding: "0 10px", fontSize: "12px" },
+									onClick: () => setJobsExpanded((v) => !v),
+									children: jobsExpanded ? t("bgHide") : t("bgShow")
+								})
+							] }),
+
+						// 展开后的完成记录：一行一条，不再是卡片
+						jobsExpanded
+							? jsx("ul", { className: c.lines, children: finished.map((job) => {
+								const elapsed = Math.max(0, Math.round(((job.endedAt > 0 ? job.endedAt : Date.now()) - job.startedAt) / 1000));
+								const label = job.phase === "failed"
+									? t("bgFailed")
+									: (job.phase === "cancelled" ? t("bgCancelled") : t("bgDone"));
+								return jsx("li", { key: job.id, className: c.line, children: [
+									// 失败的话优先显示原因 —— 只把 "xxx 失败" 摆出来、原因藏进 tooltip
+									// 等于没说，用户还得去翻日志。
+									jsx("span", { className: c.lineText, title: job.summary, children: job.error.length > 0 ? job.error : job.summary }),
+									jsx("span", { className: c.tag, "data-kind": job.phase === "failed" ? "warn" : undefined, children: label }),
+									jsx("span", { className: c.count, children: t("bgElapsed").replace("{n}", String(elapsed)) })
+								] });
+							}) })
+							: null
 					] }),
 
 				jsx("div", { className: c.row, children: [
@@ -656,6 +756,74 @@ window.__ModuleLoader__.load({
 						? jsx("button", { className: c.btn, style: { height: "24px", padding: "0 10px", fontSize: "12px" }, onClick: () => saveSite(url), children: t("save") })
 						: null
 				] }),
+
+				error.length > 0 ? jsx("p", { className: c.msg, "data-kind": "err", children: error }) : null,
+				notice.length > 0 ? jsx("p", { className: c.msg, "data-kind": "ok", children: notice }) : null,
+				busy ? jsx("p", { className: c.spin, children: t("finding") }) : null,
+
+				result !== null
+					? jsx(Fragment, { children: [
+						jsx("div", { className: c.meta, children: [
+							jsx("span", { className: c.tag, "data-kind": "src", children: result.owner + "/" + result.repo }),
+							jsx("span", { className: c.tag, children: t("ref") + " " + result.ref }),
+							result.subpath.length > 0 ? jsx("span", { className: c.tag, children: t("path") + " " + result.subpath }) : null,
+							result.cached ? jsx("span", { className: c.tag, children: t("cached") }) : null,
+							result.method === "archive"
+								? jsx("span", { className: c.tag, "data-kind": "warn", children: t("methodArchive") })
+								: jsx("span", { className: c.tag, children: t("methodTree") }),
+							jsx("span", { className: c.count, children: t("found").replace("{n}", String(found.length)) })
+						] }),
+						// 有 package.json 重试后仍读不到：必须说出来，否则用户以为"就这些"
+						result.unreadable !== undefined && result.unreadable.length > 0
+							? jsx("p", { className: c.msg, "data-kind": "err", children: t("unreadable")
+								.replace("{n}", String(result.unreadable.length))
+								.replace("{list}", result.unreadable.join("、")) })
+							: null,
+						found.length === 0
+							? jsx("p", { className: c.empty, children: t("noPlugins") })
+							: jsx("ul", { className: c.cards, children: cards })
+					] })
+					: null,
+
+				jsx("div", { className: c.groupHead, children: [
+					jsx("span", { className: c.groupLabel, children: t("installedTitle") }),
+					jsx("span", { className: c.count, children: t("installedCount").replace("{n}", String(installedList.length)) }),
+					jsx("button", { className: c.btn, style: { height: "28px", padding: "0 10px", fontSize: "12px" }, onClick: refreshLocal, children: t("refresh") })
+				] }),
+				local === null
+					? jsx("p", { className: c.spin, children: t("loading") })
+					: installedList.length === 0
+						? jsx("p", { className: c.empty, children: t("installedEmpty") })
+						: jsx("ul", { className: c.cards, children: installedList.map((plugin) => {
+							const mark = pending[plugin.name];
+							return jsx("li", { key: "local-" + plugin.name, className: c.card, children: [
+								jsx("div", { className: c.cardMain, children: [
+									jsx("div", { className: c.cardTitle, children: [
+										jsx("span", { className: c.name, children: plugin.name }),
+										plugin.version.length > 0 ? jsx("span", { className: c.ver, children: "v" + plugin.version }) : null,
+										plugin.enabled ? null : jsx("span", { className: c.tag, children: t("disabled") }),
+										plugin.owner !== undefined
+											? jsx("span", { className: c.tag, "data-kind": "src", children: t("fromRepo").replace("{owner}", plugin.owner).replace("{repo}", plugin.repo) })
+											: jsx("span", { className: c.tag, children: t("local") }),
+										plugin.errorCode.length > 0
+											? jsx("span", { className: c.tag, "data-kind": "warn", children: plugin.errorCode })
+											: null
+									] }),
+									plugin.subpath !== undefined && plugin.subpath.length > 0
+										? jsx("div", { className: c.path, children: plugin.subpath })
+										: null,
+									plugin.description.length > 0 ? jsx("p", { className: c.desc, children: plugin.description }) : null
+								] }),
+								jsx("div", { className: c.side, children: jsx("button", {
+									className: c.btn,
+									"data-kind": "danger",
+									disabled: mark !== undefined || plugin.removable !== true,
+									title: plugin.removable === true ? t("uninstall") : t("notRemovable"),
+									onClick: () => doUninstall(plugin.name),
+									children: mark === "uninstall" ? t("uninstalling") : t("uninstall")
+								}) })
+							] });
+						}) }),
 
 				// ── 社区插件检索 ───────────────────────────────────────────
 				jsx("div", { className: c.groupHead, children: [
@@ -718,68 +886,6 @@ window.__ModuleLoader__.load({
 							}) })
 							: null
 					] }),
-
-				error.length > 0 ? jsx("p", { className: c.msg, "data-kind": "err", children: error }) : null,
-				notice.length > 0 ? jsx("p", { className: c.msg, "data-kind": "ok", children: notice }) : null,
-				busy ? jsx("p", { className: c.spin, children: t("finding") }) : null,
-
-				result !== null
-					? jsx(Fragment, { children: [
-						jsx("div", { className: c.meta, children: [
-							jsx("span", { className: c.tag, "data-kind": "src", children: result.owner + "/" + result.repo }),
-							jsx("span", { className: c.tag, children: t("ref") + " " + result.ref }),
-							result.subpath.length > 0 ? jsx("span", { className: c.tag, children: t("path") + " " + result.subpath }) : null,
-							result.cached ? jsx("span", { className: c.tag, children: t("cached") }) : null,
-							result.method === "archive"
-								? jsx("span", { className: c.tag, "data-kind": "warn", children: t("methodArchive") })
-								: jsx("span", { className: c.tag, children: t("methodTree") }),
-							jsx("span", { className: c.count, children: t("found").replace("{n}", String(found.length)) })
-						] }),
-						found.length === 0
-							? jsx("p", { className: c.empty, children: t("noPlugins") })
-							: jsx("ul", { className: c.cards, children: cards })
-					] })
-					: null,
-
-				jsx("div", { className: c.groupHead, children: [
-					jsx("span", { className: c.groupLabel, children: t("installedTitle") }),
-					jsx("span", { className: c.count, children: t("installedCount").replace("{n}", String(installedList.length)) }),
-					jsx("button", { className: c.btn, style: { height: "28px", padding: "0 10px", fontSize: "12px" }, onClick: refreshLocal, children: t("refresh") })
-				] }),
-				local === null
-					? jsx("p", { className: c.spin, children: t("loading") })
-					: installedList.length === 0
-						? jsx("p", { className: c.empty, children: t("installedEmpty") })
-						: jsx("ul", { className: c.cards, children: installedList.map((plugin) => {
-							const mark = pending[plugin.name];
-							return jsx("li", { key: "local-" + plugin.name, className: c.card, children: [
-								jsx("div", { className: c.cardMain, children: [
-									jsx("div", { className: c.cardTitle, children: [
-										jsx("span", { className: c.name, children: plugin.name }),
-										plugin.version.length > 0 ? jsx("span", { className: c.ver, children: "v" + plugin.version }) : null,
-										plugin.enabled ? null : jsx("span", { className: c.tag, children: t("disabled") }),
-										plugin.owner !== undefined
-											? jsx("span", { className: c.tag, "data-kind": "src", children: t("fromRepo").replace("{owner}", plugin.owner).replace("{repo}", plugin.repo) })
-											: jsx("span", { className: c.tag, children: t("local") }),
-										plugin.errorCode.length > 0
-											? jsx("span", { className: c.tag, "data-kind": "warn", children: plugin.errorCode })
-											: null
-									] }),
-									plugin.subpath !== undefined && plugin.subpath.length > 0
-										? jsx("div", { className: c.path, children: plugin.subpath })
-										: null,
-									plugin.description.length > 0 ? jsx("p", { className: c.desc, children: plugin.description }) : null
-								] }),
-								jsx("div", { className: c.side, children: jsx("button", {
-									className: c.btn,
-									"data-kind": "danger",
-									disabled: mark !== undefined || plugin.removable !== true,
-									title: plugin.removable === true ? t("uninstall") : t("notRemovable"),
-									onClick: () => doUninstall(plugin.name),
-									children: mark === "uninstall" ? t("uninstalling") : t("uninstall")
-								}) })
-							] });
-						}) })
 			] });
 		}
 
@@ -813,6 +919,7 @@ window.__ModuleLoader__.load({
 				recentUrls: () => callRemote("recentUrls"),
 				searchCommunity: (keywords, page) => callRemote("searchCommunity", keywords, page),
 				backgroundStatus: () => callRemote("backgroundStatus"),
+				cancelJob: (id) => callRemote("cancelJob", id),
 				forgetUrl: (url) => callRemote("forgetUrl", url)
 			});
 

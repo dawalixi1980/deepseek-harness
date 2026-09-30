@@ -34,7 +34,7 @@ DeepSeek Harness 插件：**粘一个 GitHub 仓库地址 → 递归找出仓库
 ```powershell
 cd dsh-plugin-url
 pnpm pack
-dsh plugin --profile <你的 profile> add .\dsh-plugin-url-0.2.0.tgz
+dsh plugin --profile <你的 profile> add .\dsh-plugin-url-0.3.0.tgz
 ```
 
 装完在 GUI 里刷新页面即可（本插件带 client 半，host 半会被 HMR 热加载；若面板空白就重启 DSH）。
@@ -77,14 +77,18 @@ dsh plugin --profile <你的 profile> add .\dsh-plugin-url-0.2.0.tgz
 
 扫描和安装都是**后台任务**，跑在 host 进程里 —— 你退出设置页，活儿照跑。
 
-面板顶部会有一条「后台任务」，显示每个任务在干什么、跑了多久。再打开设置时：
+面板顶部有一条「后台任务」，**只有进行中的才占一张卡片**，带「取消」按钮；完成的压成
+「最近完成 N 条」一行，想看细节再展开。这么收是因为：反复重开面板扫同一个仓库会不断新增
+记录，全铺成卡片就是一屏一模一样的「扫描完成」。
 
-- 有任务在跑 → 卡片还在，继续显示进度（面板每 1.5 秒问一次 host）
+- 有任务在跑 → 卡片还在，显示状态和已跑秒数（面板每 1.5 秒问一次 host）
+- 点「取消」→ **网络请求真的会被中止**（取消信号一路传到 `fetch`），不是只把界面上的字删掉。
+  安装那步走官方的 `cancelInstall`，由插件管理器自己回滚 `package.json` / `pnpm-lock.yaml`
 - 已经跑完 → **上次的扫描结果直接回来，不用重扫**
+- 同一个仓库重复扫描 → 旧的已完成记录被**替换**，不再堆叠；正在跑的时候再点「查找」会
+  接到同一个任务上，不会重复下载
 
 > 一个例外：**整个 DSH 进程退出**时，正在跑的任务会真的断掉。后台 ≠ 能扛进程退出。
->
-> 另一个好处：同一个仓库正在扫的时候再点「查找」，会**接到那个任务上**，不会重复下载。
 
 ### 社区插件检索
 
@@ -175,7 +179,8 @@ lib/discover.js       # URL 解析 / 归档下载 / ZIP 解压 / 递归扫描（
 lib/scan.js           # 插件包发现 + readiness 判定
 lib/tarball.js        # 纯 Node npm tarball 打包器
 lib/community.js      # 社区检索：topic:dsh-plugin（带 10 分钟缓存与限流处理）
-test/*.mjs            # 5 个测试
+lib/tree-scan.js      # 轻量发现：git trees API 路径清单 + 按需抓 package.json
+test/*.mjs            # 7 个测试
 ```
 
 ### 远程接口（host 半 `pluginUrl` 命名空间）
@@ -187,6 +192,8 @@ test/*.mjs            # 5 个测试
 | `uninstallPlugin` | `name` | 卸载 |
 | `listInstalled` | — | 已装的可管理插件（含来源仓库） |
 | `searchCommunity` | `keywords`, `page` | 按 `topic:dsh-plugin` 检索候选仓库（只返回仓库元信息） |
+| `backgroundStatus` | — | 后台任务表 + 最近的发现结果（面板挂载时读它来「原地续上」） |
+| `cancelJob` | `id` | 取消一个正在跑的后台任务（扫描走 abort，安装走官方 `cancelInstall`） |
 | `rememberUrl` / `recentUrls` / `forgetUrl` | `url` / — / `url` | 已保存的仓库网址（归一化 + 去重，最多 12 条） |
 
 ---

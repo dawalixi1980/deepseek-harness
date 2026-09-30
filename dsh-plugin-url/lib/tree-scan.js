@@ -47,12 +47,24 @@ export function treeRefCandidates(ref) {
   return out;
 }
 
-async function getJson(url, accept) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TREE_REQUEST_TIMEOUT_MS);
+/** 取消时抛这个，调用方据此把任务标成「已取消」而不是「失败」。 */
+export class CancelledError extends Error {
+  constructor() {
+    super("已取消");
+    this.name = "CancelledError";
+  }
+}
+
+/**
+ * 一次 GET。超时用内部 controller，外部取消用传入的 signal —— 两者合并。
+ */
+async function getJson(url, accept, signal) {
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), TREE_REQUEST_TIMEOUT_MS);
+  const combined = signal ? AbortSignal.any([timeout.signal, signal]) : timeout.signal;
   try {
     const response = await fetch(url, {
-      signal: controller.signal,
+      signal: combined,
       redirect: "follow",
       headers: { accept, "user-agent": "dsh-plugin-url" },
     });
@@ -64,6 +76,10 @@ async function getJson(url, accept) {
     if (response.status === 404) return { notFound: true };
     if (!response.ok) throw new Error(`GitHub API 返回 HTTP ${response.status}`);
     return { body: await response.json() };
+  } catch (error) {
+    // 外部取消要和"超时/网络失败"区分开，否则任务会被标成失败
+    if (signal?.aborted === true) throw new CancelledError();
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -78,10 +94,36 @@ async function readCache(file) {
 }
 
 /**
+ * 抓一个 package.json，带重试。
+ *
+ * 为什么要重试：实测抓 `dsh-lexiang/package.json` 时 raw.githubusercontent 偶发
+ * `fetch failed`。而下面的循环原本是 `catch { continue; }` —— 也就是**一次瞬时抖动就会
+ * 静默漏掉一个插件**，用户看到的是不完整的列表、还没有任何提示。这个必须重试。
+ */
+const MANIFEST_RETRIES = 2;
+
+async function getJsonRetry(url, accept, signal) {
+  let last;
+  for (let attempt = 0; attempt <= MANIFEST_RETRIES; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+    try {
+      return await getJson(url, accept, signal);
+    } catch (error) {
+      if (error instanceof CancelledError) throw error;
+      if (signal?.aborted === true) throw new CancelledError();
+      last = error;
+    }
+  }
+  throw last ?? new Error("请求失败");
+}
+
+/**
  * 取一个仓库的**路径清单**（只取 blob，不取目录）。
  * @returns {Promise<{ref: string, truncated: boolean, paths: string[], sizes: Map<string, number>, cached: boolean}>}
  */
 export async function fetchRepoTree(owner, repo, ref, options = {}) {
+  const signal = options.signal;
+  if (signal?.aborted === true) throw new CancelledError();
   const cacheRoot = options.cacheDir;
   const cacheFile = typeof cacheRoot === "string" && cacheRoot.length > 0
     ? join(cacheRoot, "trees", `${owner}__${repo}__${(ref || "HEAD").replace(/[^a-zA-Z0-9._-]/g, "_")}.json`)
@@ -103,7 +145,7 @@ export async function fetchRepoTree(owner, repo, ref, options = {}) {
   let lastError;
   for (const candidate of treeRefCandidates(ref)) {
     const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(candidate)}?recursive=1`;
-    const result = await getJson(url, "application/vnd.github+json");
+    const result = await getJson(url, "application/vnd.github+json", signal);
     if (result.notFound === true) continue;
     if (result.body === undefined) continue;
     const blobs = Array.isArray(result.body.tree) ? result.body.tree.filter((node) => node?.type === "blob") : [];
@@ -177,7 +219,8 @@ function readinessOf(manifest, entries, dirPrefix, pathSet) {
  * @throws {TreeTruncatedError} 路径清单被截断，调用方应回退
  */
 export async function scanViaTree(owner, repo, ref, options = {}) {
-  const tree = await fetchRepoTree(owner, repo, ref, { cacheDir: options.cacheDir });
+  const signal = options.signal;
+  const tree = await fetchRepoTree(owner, repo, ref, { cacheDir: options.cacheDir, signal });
   if (tree.truncated) throw new TreeTruncatedError();
 
   const pathSet = new Set(tree.paths);
@@ -192,15 +235,24 @@ export async function scanViaTree(owner, repo, ref, options = {}) {
 
   manifests.sort();
   const found = [];
+  /** 重试之后仍然读不到的 package.json —— 报出去，别静默吞掉。 */
+  const unreadable = [];
   for (const manifestPath of manifests.slice(0, MAX_MANIFEST_FETCHES)) {
+    if (signal?.aborted === true) throw new CancelledError();
     const subpath = subpathOf(manifestPath);
     const url = `https://raw.githubusercontent.com/${owner}/${repo}/${tree.ref}/${manifestPath}`;
     let manifest;
     try {
-      const result = await getJson(url, "text/plain");
-      if (result.notFound === true || result.body === undefined) continue;
+      const result = await getJsonRetry(url, "text/plain", signal);
+      if (result.notFound === true || result.body === undefined) {
+        unreadable.push(manifestPath);
+        continue;
+      }
       manifest = result.body;
-    } catch {
+    } catch (error) {
+      // 取消要往上抛，不能被当成"这个 package.json 读不到"静默跳过
+      if (error instanceof CancelledError) throw error;
+      unreadable.push(manifestPath);
       continue;
     }
     if (manifest === null || typeof manifest !== "object") continue;
@@ -230,5 +282,5 @@ export async function scanViaTree(owner, repo, ref, options = {}) {
   }
 
   found.sort((a, b) => a.subpath.localeCompare(b.subpath));
-  return { plugins: found, ref: tree.ref, cached: tree.cached };
+  return { plugins: found, ref: tree.ref, cached: tree.cached, unreadable };
 }

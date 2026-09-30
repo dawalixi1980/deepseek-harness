@@ -195,6 +195,8 @@ const inspectResultSchema = z.object({
   cached: z.boolean(),
   /** 走的是哪条发现路线：tree = 轻量路径清单，archive = 下载整包归档回退。 */
   method: z.string(),
+  /** 重试后仍然读不到的 package.json —— 报出去，别让用户以为"就这些"。 */
+  unreadable: z.array(z.string()),
 });
 
 const installResultSchema = z.object({
@@ -274,6 +276,14 @@ const backgroundJobSchema = z.object({
   endedAt: z.number(),
   error: z.string(),
   summary: z.string(),
+  cancellable: z.boolean(),
+});
+
+/** 取消一个后台任务。 */
+const cancelJobResultSchema = z.object({
+  id: z.string(),
+  cancelled: z.boolean(),
+  status: z.string(),
 });
 
 const backgroundStatusResultSchema = z.object({
@@ -406,6 +416,18 @@ const MANIFEST = {
       parameters: [],
       result: codec("dsh-plugin-url#BackgroundStatusResult", backgroundStatusResultSchema),
     },
+    {
+      // 取消一个正在跑的后台任务
+      id: "dsh-plugin-url#pluginUrl/cancelJob",
+      service: "pluginUrl",
+      namespace: "pluginUrl",
+      method: "cancelJob",
+      invocation: { kind: "direct" },
+      parameters: [
+        { name: "id", wire: "id", source: "json", codec: codec("dsh-plugin-url#JobId", z.string()) },
+      ],
+      result: codec("dsh-plugin-url#CancelJobResult", cancelJobResultSchema),
+    },
   ],
   model: { services: [], events: [], objects: [] },
 };
@@ -443,6 +465,7 @@ class PluginUrlGateway extends TypertRemoteService {
     if (job.phase === "running") {
       return job.kind === "install" ? `正在安装 ${job.label}` : `正在扫描 ${job.label}`;
     }
+    if (job.phase === "cancelled") return `${job.label} 已取消`;
     if (job.phase === "failed") return `${job.label} 失败`;
     return job.kind === "install" ? `${job.label} 已安装` : `${job.label} 扫描完成`;
   }
@@ -450,13 +473,22 @@ class PluginUrlGateway extends TypertRemoteService {
   /**
    * 跑一个后台任务；同一把 key 已经在跑就直接接上去，不重复下载。
    * 任务本身与客户端在不在无关 —— 这正是"关掉面板也继续"的实现方式。
+   *
+   * 每个任务带一个 AbortController：取消时把 signal 一路传到下载/扫描，
+   * 让网络请求真的停下来，而不是只把界面上的那行字删掉。
    */
   startJob({ kind, key, url, subpath, label }, work) {
     const existing = this.running.get(key);
     if (existing !== undefined) return existing.promise;
 
+    // 同一个目标又跑了一次（用户重开面板后又点了一次「查找」）：把旧的**已完成**记录换掉。
+    // 不这么做的话，任务列表里会堆一屏一模一样的「扫描完成」—— 就是那个"太繁杂"。
+    this.jobs = this.jobs.filter((job) => job.key !== key || job.phase === "running");
+
+    const controller = new AbortController();
     const job = {
       id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      key,
       kind,
       url,
       subpath,
@@ -465,20 +497,32 @@ class PluginUrlGateway extends TypertRemoteService {
       startedAt: Date.now(),
       endedAt: 0,
       error: "",
+      summary: "",
+      controller,
+      cancelRequested: false,
+      /** 安装用：交给官方插件管理器的 requestId，取消时要用它。 */
+      requestId: "",
     };
     this.jobs.unshift(job);
     if (this.jobs.length > MAX_BACKGROUND_JOBS) this.jobs.length = MAX_BACKGROUND_JOBS;
 
     const promise = (async () => {
       try {
-        const result = await work();
+        const result = await work(controller.signal, job);
         job.phase = "done";
         job.endedAt = Date.now();
         if (kind === "inspect") this.results.set(url, { url, label, at: job.endedAt, result });
         return result;
       } catch (error) {
-        job.phase = "failed";
         job.endedAt = Date.now();
+        // 用 cancelRequested 判定而不是 signal.aborted：安装那步有自己的取消通道，
+        // 偶尔会"太晚了"（官方返回 too-late，安装其实成功了），那种情况不该标成已取消。
+        if (job.cancelRequested === true) {
+          job.phase = "cancelled";
+          job.error = "";
+          throw new Error("已取消");
+        }
+        job.phase = "failed";
         job.error = String(error?.message ?? error);
         throw error;
       } finally {
@@ -490,6 +534,28 @@ class PluginUrlGateway extends TypertRemoteService {
     job.promise = promise;
     this.running.set(key, job);
     return promise;
+  }
+
+  /**
+   * 取消一个正在跑的后台任务。
+   * 安装走官方 `cancelInstall`（它会自己回滚 package.json / pnpm-lock.yaml），
+   * 扫描走我们自己的 AbortController。
+   */
+  async cancelJob(id) {
+    const job = this.jobs.find((item) => item.id === id);
+    if (job === undefined) throw new Error(`没有这个后台任务：${id}`);
+    if (job.phase !== "running") return { id, cancelled: false, status: job.phase };
+
+    job.cancelRequested = true;
+    if (job.kind === "install" && job.requestId.length > 0) {
+      try {
+        await this.manager().cancelInstall(job.requestId);
+      } catch {
+        // 已经结束、或者已经进入应用阶段 —— 下面的 abort 兜底
+      }
+    }
+    job.controller.abort();
+    return { id, cancelled: true, status: "cancelling" };
   }
 
   /** 后台状态：最近的任务 + 最近的发现结果。客户端轮询它。 */
@@ -507,6 +573,7 @@ class PluginUrlGateway extends TypertRemoteService {
         endedAt: job.endedAt,
         error: job.error,
         summary: job.summary ?? PluginUrlGateway.summaryOf(job),
+        cancellable: job.phase === "running",
       })),
       results,
     };
@@ -532,7 +599,7 @@ class PluginUrlGateway extends TypertRemoteService {
     const loc = parseRepoUrl(url);
     return this.startJob(
       { kind: "inspect", key: `inspect|${url}`, url, subpath: loc.subpath, label: `${loc.owner}/${loc.repo}` },
-      () => this.runInspect(url),
+      (signal) => this.runInspect(url, signal),
     );
   }
 
@@ -542,8 +609,9 @@ class PluginUrlGateway extends TypertRemoteService {
    *      3.5 秒 vs 归档路线 5 分钟以上（仓库 83 MiB 但只有 169 个文件，全压在媒体文件上）。
    *   2. 归档路线（回退）：路径清单被截断、core API 限流、或 raw 读不到时，退回原来的
    *      「下载整包 → 解压 → 遍历」，慢但一定能扫全。
+   * `signal` 是后台任务的取消信号，一路传到 fetch，让"取消"真的停下网络请求。
    */
-  async runInspect(url) {
+  async runInspect(url, signal) {
     const loc = parseRepoUrl(url);
     const installed = await this.installedNames();
 
@@ -551,22 +619,29 @@ class PluginUrlGateway extends TypertRemoteService {
     let ref;
     let cached;
     let method;
+    /** 重试之后仍然读不到的 package.json —— 一路带到界面上，避免"静默少几个"。 */
+    let unreadable = [];
     try {
-      const tree = await scanViaTree(loc.owner, loc.repo, loc.ref, { cacheDir: cacheDir(), subpath: loc.subpath });
+      const tree = await scanViaTree(loc.owner, loc.repo, loc.ref, { cacheDir: cacheDir(), subpath: loc.subpath, signal });
       found = tree.plugins;
       ref = tree.ref;
       cached = tree.cached;
       method = "tree";
+      unreadable = tree.unreadable ?? [];
     } catch (error) {
+      // 取消不是失败：绝不能掉进归档回退，否则用户点了"取消"反而开始下整包
+      if (signal?.aborted === true) throw new Error("已取消");
       // 截断/限流/网络问题都走回退，不让用户卡在"太久了"
       const { buffer, ref: archiveRef, cached: archiveCached } = await fetchArchive(loc.owner, loc.repo, loc.ref, {
         cacheDir: cacheDir(),
+        signal,
       });
       ref = archiveRef;
       cached = archiveCached;
       method = "archive";
       const tempDir = await makeTempDir();
       try {
+        if (signal?.aborted === true) throw new Error("已取消");
         await extractArchive(buffer, tempDir);
         let scanDir = tempDir;
         // subpath 收窄扫描范围时，结果里的 subpath 必须**补回前缀**，
@@ -598,6 +673,7 @@ class PluginUrlGateway extends TypertRemoteService {
       totalScanned: found.length,
       cached,
       method,
+      unreadable,
       plugins: found.map((plugin) => ({ ...plugin, installed: installed.has(plugin.name) })),
     };
   }
@@ -617,17 +693,18 @@ class PluginUrlGateway extends TypertRemoteService {
     const label = target.length === 0 ? `${loc.owner}/${loc.repo}` : `${loc.owner}/${loc.repo}:${target}`;
     return this.startJob(
       { kind: "install", key: `install|${url}|${target}`, url, subpath: target, label },
-      () => this.runInstall(url, target),
+      (signal, job) => this.runInstall(url, target, signal, job),
     );
   }
 
-  /** 安装的实际实现。 */
-  async runInstall(url, target) {
+  /** 安装的实际实现。`job` 用来登记 requestId —— 取消安装要靠它。 */
+  async runInstall(url, target, signal, job) {
     const loc = parseRepoUrl(url);
-    const { buffer, ref } = await fetchArchive(loc.owner, loc.repo, loc.ref, { cacheDir: cacheDir() });
+    const { buffer, ref } = await fetchArchive(loc.owner, loc.repo, loc.ref, { cacheDir: cacheDir(), signal });
 
     const tempDir = await makeTempDir();
     try {
+      if (signal?.aborted === true) throw new Error("已取消");
       await extractArchive(buffer, tempDir);
 
       let pkgDir;
@@ -655,13 +732,20 @@ class PluginUrlGateway extends TypertRemoteService {
       await saveState(state);
 
       let outcome;
+      // 交给官方插件管理器时带一个 requestId：取消安装要用它调 cancelInstall，
+      // 由管理器自己回滚 package.json / pnpm-lock.yaml（比我们自己收拾干净）。
+      const requestId = `dsh-plugin-url-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      job.requestId = requestId;
+      if (signal?.aborted === true) throw new Error("已取消");
       try {
-        outcome = await this.manager().installBundle(file, { enabled: true });
+        outcome = await this.manager().installBundle(file, { enabled: true, requestId });
       } catch (error) {
         if (previous === undefined) delete state.installed[pkgName];
         else state.installed[pkgName] = previous;
         await saveState(state);
         throw new Error(String(error?.message ?? error));
+      } finally {
+        job.requestId = "";
       }
 
       if (outcome?.application === "failed" || outcome?.error !== undefined) {

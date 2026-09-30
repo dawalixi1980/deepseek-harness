@@ -297,7 +297,7 @@ check("远程方法名不撞 RemoteNamespaceService 原型（host 半）", () =>
 
 check("host 线名与面板约定一致（pluginUrl + installPlugin / uninstallPlugin）", () => {
 	const methods = manifest.invocations.map((value) => value.method).sort();
-	const expected = ["backgroundStatus", "forgetUrl", "inspect", "installPlugin", "listInstalled", "recentUrls", "rememberUrl", "searchCommunity", "uninstallPlugin"];
+	const expected = ["backgroundStatus", "cancelJob", "forgetUrl", "inspect", "installPlugin", "listInstalled", "recentUrls", "rememberUrl", "searchCommunity", "uninstallPlugin"];
 	if (JSON.stringify(methods) !== JSON.stringify(expected)) throw new Error("method = " + JSON.stringify(methods));
 	for (const invocation of manifest.invocations) {
 		if (invocation.namespace !== "pluginUrl") throw new Error(`${invocation.id} 的 namespace = ${invocation.namespace}`);

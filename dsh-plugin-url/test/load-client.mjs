@@ -230,7 +230,7 @@ check('远程贡献 package 为 dsh-plugin-url', () => {
 check('远程描述符线名齐全且含 installPlugin / uninstallPlugin', () => {
   if (!Array.isArray(mounted?.descriptors)) throw new Error('descriptors 不是数组');
   const methods = mounted.descriptors.map((d) => d.method).sort();
-  const expected = ['backgroundStatus', 'forgetUrl', 'inspect', 'installPlugin', 'listInstalled', 'recentUrls', 'rememberUrl', 'searchCommunity', 'uninstallPlugin'];
+  const expected = ['backgroundStatus', 'cancelJob', 'forgetUrl', 'inspect', 'installPlugin', 'listInstalled', 'recentUrls', 'rememberUrl', 'searchCommunity', 'uninstallPlugin'];
   if (JSON.stringify(methods) !== JSON.stringify(expected)) throw new Error('method = ' + JSON.stringify(methods));
 });
 check('注册了 settings.section 分区', () => {
@@ -246,7 +246,7 @@ check('注册的组件就是导出的 PluginUrlSection', () => {
 check('分区 face 暴露 installPlugin / uninstallPlugin 而不是 install / uninstall', () => {
   if (typeof registeredSection.inject !== 'function') throw new Error('分区没有 inject（face 工厂）');
   const face = registeredSection.inject();
-  for (const name of ['installPlugin', 'uninstallPlugin', 'inspect', 'listInstalled', 'rememberUrl', 'recentUrls', 'forgetUrl', 'searchCommunity', 'backgroundStatus']) {
+  for (const name of ['installPlugin', 'uninstallPlugin', 'inspect', 'listInstalled', 'rememberUrl', 'recentUrls', 'forgetUrl', 'searchCommunity', 'backgroundStatus', 'cancelJob']) {
     if (typeof face?.[name] !== 'function') throw new Error('face.' + name + ' 缺失');
   }
   if (face.install !== undefined) throw new Error('face 上还有旧线名 install');
@@ -337,6 +337,10 @@ const ZH = {
   communitySearch: '搜索社区插件', communityView: '查看插件', communityTitle: '社区插件',
   communityStars: '{n} 星', communityFound: '共 {n} 个仓库（第 {page} 页）',
   bgTitle: '后台任务', bgRunning: '进行中', bgDone: '已完成', bgFailed: '失败', bgElapsed: '{n} 秒',
+  bgCancel: '取消', bgCancelling: '取消中…', bgCancelled: '已取消', bgIdle: '空闲',
+  bgRunningCount: '{n} 个进行中', bgFinished: '最近完成 {n} 条', bgShow: '展开', bgHide: '收起',
+  unreadable: '有 {n} 个 package.json 重试后仍然读不到，列表可能不全：{list}',
+  opFailed: '操作失败',
 };
 const t = (key) => (key in ZH ? ZH[key] : key);
 
@@ -349,6 +353,7 @@ const fakeResult = {
   subpath: '',
   cached: false,
   method: 'tree',
+  unreadable: [],
   totalScanned: 3,
   plugins: [
     {
@@ -429,11 +434,35 @@ const communitySeeds = [...seeds, 'diagram', 2, fakeCommunity, false];
 // 再往后是 jobs（后台任务快照）
 const backgroundSeeds = [...communitySeeds, fakeBackground.jobs];
 
+// 收窄后的后台任务：1 个进行中 + 2 个已完成。用来验证「完成的不占卡片」和「取消」。
+const fakeJobs = {
+  running: {
+    id: 'job-running', kind: 'inspect', url: seedUrl, subpath: '', label: 'dawalixi1980/deepseek-harness',
+    phase: 'running', startedAt: Date.now() - 5000, endedAt: 0, error: '',
+    summary: '正在扫描 dawalixi1980/deepseek-harness', cancellable: true,
+  },
+  finished: {
+    id: 'job-finished', kind: 'inspect', url: 'https://github.com/a/b', subpath: '', label: 'a/b',
+    phase: 'done', startedAt: Date.now() - 20000, endedAt: Date.now() - 18000, error: '',
+    summary: 'a/b 扫描完成', cancellable: false,
+  },
+  failed: {
+    id: 'job-failed', kind: 'install', url: 'https://github.com/c/d', subpath: 'p', label: 'c/d:p',
+    phase: 'failed', startedAt: Date.now() - 30000, endedAt: Date.now() - 29000, error: '装不上：boom',
+    summary: 'c/d:p 失败', cancellable: false,
+  },
+};
+const mixedJobs = [fakeJobs.running, fakeJobs.finished, fakeJobs.failed];
+
+// jobsExpanded 是 jobs 之后的最后一个 hook（默认 false）
+const runningSeeds = [...communitySeeds, mixedJobs, false];
+const expandedSeeds = [...communitySeeds, mixedJobs, true];
+
 // 「刚打开面板」的形态：本地还没有结果，全靠后台快照恢复
 const coldSeeds = [seedUrl, false, null, '', '', {}, fakeLocal, [], '', 1, null, false];
 
 /** 记录 face 被调用情况；同时挂上旧线名 install / uninstall 以证明没人再调它们。 */
-const calls = { inspect: [], installPlugin: [], uninstallPlugin: [], listInstalled: 0, install: [], uninstall: [], searchCommunity: [], backgroundStatus: 0 };
+const calls = { inspect: [], installPlugin: [], uninstallPlugin: [], listInstalled: 0, install: [], uninstall: [], searchCommunity: [], backgroundStatus: 0, cancelJob: [] };
 function makeFace(overrides = {}) {
   return {
     inspect: async (url) => { calls.inspect.push(url); return fakeResult; },
@@ -451,6 +480,7 @@ function makeFace(overrides = {}) {
     forgetUrl: async () => ({ sites: [] }),
     searchCommunity: async (keywords, page) => { calls.searchCommunity.push([keywords, page]); return fakeCommunity; },
     backgroundStatus: async () => { calls.backgroundStatus += 1; return fakeBackground; },
+    cancelJob: async (id) => { calls.cancelJob.push(id); return { id, cancelled: true, status: 'cancelling' }; },
     currentSessionId: () => 'test-session',
     // 改名前的线名：留在 face 上，一旦面板还在调它，下面的断言就会响。
     install: async () => { calls.install.push('install'); return { ok: true }; },
@@ -466,6 +496,7 @@ function resetCalls() {
   calls.uninstall.length = 0;
   calls.searchCommunity.length = 0;
   calls.backgroundStatus = 0;
+  calls.cancelJob.length = 0;
   calls.listInstalled = 0;
 }
 
@@ -684,15 +715,16 @@ check('挂载时读一次后台状态', () => {
   if (calls.backgroundStatus < 1) throw new Error('挂载没有调用 face.backgroundStatus');
 });
 
-/** 任务条：状态、耗时、失败原因都要真的渲染出来。 */
-check('后台任务条渲染出任务状态与耗时', () => {
+/**
+ * 任务条：进行中的那张卡片要有状态标签和耗时。
+ * （已完成的默认收起，所以失败状态/原因在下面「展开后才显示」那条里断言。）
+ */
+check('后台任务条：进行中的卡片有状态与耗时', () => {
   const { mod: seeded } = build(backgroundSeeds);
   const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
   const text = collectText(rendered, []).join(' | ');
   if (!text.includes(ZH.bgTitle)) throw new Error('没有后台任务标题：' + text.slice(0, 200));
   if (!text.includes('正在扫描 dawalixi1980/deepseek-harness')) throw new Error('没有显示进行中的任务');
-  if (!text.includes(ZH.bgFailed)) throw new Error('没有显示失败状态');
-  if (!text.includes('装不上：boom')) throw new Error('没有显示失败原因');
   if (!/\d+ 秒/.test(text)) throw new Error('没有显示耗时：' + text.slice(0, 300));
 });
 
@@ -711,6 +743,93 @@ check('重开面板能续上后台结果且不重新扫描', async () => {
   const text = collectText(rendered, []).join(' | ');
   if (!text.includes('dsh-docx')) throw new Error('没有从后台快照恢复出插件列表：' + text.slice(0, 250));
   if (calls.inspect.length !== 0) throw new Error('恢复过程不该重新扫描，但 inspect 被调了 ' + calls.inspect.length + ' 次');
+});
+
+/**
+ * 收窄后的后台任务：**已完成的默认只占一行，不占卡片**。
+ * 之前每次重开面板扫同一个仓库都会多一条一模一样的「扫描完成」卡片堆在界面上，
+ * 这条断言就是钉住「不再堆」。
+ */
+check('后台任务：完成的默认收起，只留一行摘要', () => {
+  const { mod: seeded } = build(runningSeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const text = collectText(rendered, []).join(' | ');
+  if (!text.includes(fakeJobs.running.summary)) throw new Error('没有显示进行中的任务');
+  if (text.includes(fakeJobs.finished.summary)) throw new Error('已完成的任务默认不该展开成卡片：' + fakeJobs.finished.summary);
+  if (!text.includes(t('bgFinished').replace('{n}', '2'))) throw new Error('没有显示已完成条数：' + text.slice(0, 300));
+});
+
+/** 展开之后才看得到已完成的明细 —— 包括失败的状态和原因。 */
+check('后台任务：展开后才显示已完成明细', () => {
+  const { mod: seeded } = build(expandedSeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const text = collectText(rendered, []).join(' | ');
+  if (!text.includes(fakeJobs.finished.summary)) throw new Error('展开后应显示已完成明细');
+  if (!text.includes(ZH.bgFailed)) throw new Error('展开后应显示失败状态');
+  if (!text.includes('装不上：boom')) throw new Error('展开后应显示失败原因（不能只藏在 tooltip 里）');
+  if (!text.includes(t('bgHide'))) throw new Error('展开后按钮应变成「收起」');
+});
+
+/** 进行中的任务才有取消按钮，点了要真的调 face.cancelJob(id)。 */
+check('后台任务：进行中才有取消按钮，点击调用 face.cancelJob(id)', () => {
+  resetCalls();
+  const { mod: seeded } = build(runningSeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const card = cardWithText(rendered, fakeJobs.running.summary);
+  const [button] = buttonsIn(card);
+  if (button === undefined) throw new Error('进行中的卡片里没有取消按钮');
+  if (collectText(button, []).join('') !== ZH.bgCancel) throw new Error('按钮文字 = ' + collectText(button, []).join(''));
+  if (button.props.disabled !== false) throw new Error('cancellable=true 却被禁用');
+  button.props.onClick();
+  if (calls.cancelJob.length !== 1) throw new Error('cancelJob 调用次数 = ' + calls.cancelJob.length);
+  if (calls.cancelJob[0] !== fakeJobs.running.id) throw new Error('取消的 id = ' + calls.cancelJob[0]);
+});
+
+/** 已完成的任务没有取消按钮（不该让用户去取消一个已经结束的东西）。 */
+check('后台任务：已完成的不给取消按钮', () => {
+  const { mod: seeded } = build(expandedSeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const line = cardWithText(rendered, fakeJobs.finished.summary);
+  if (buttonsIn(line).length !== 0) throw new Error('已完成的记录里不该有按钮');
+});
+
+/**
+ * 取消不是失败：RPC 因为取消而 reject 时必须走提示，不能显示成红色报错。
+ */
+check('取消不算失败：不显示成「操作失败」', async () => {
+  const { reactApi, mod: seeded } = build(runningSeeds, { runEffects: true });
+  const api = makeFace({
+    backgroundStatus: async () => ({ jobs: mixedJobs, results: [] }),
+    cancelJob: async () => { throw new Error('已取消'); },
+  });
+  renderWith(reactApi, seeded.PluginUrlSection, { ...api, t });
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const rendered = renderWith(reactApi, seeded.PluginUrlSection, { ...api, t });
+  const card = cardWithText(rendered, fakeJobs.running.summary);
+  buttonsIn(card)[0].props.onClick();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const after = renderWith(reactApi, seeded.PluginUrlSection, { ...api, t });
+  const text = collectText(after, []).join(' | ');
+  if (text.includes(ZH.opFailed)) throw new Error('取消被显示成了操作失败：' + text.slice(0, 300));
+  if (!text.includes(ZH.bgCancelled)) throw new Error('取消后应显示「已取消」提示：' + text.slice(0, 300));
+});
+
+/**
+ * 轻量路线里某个 package.json 重试后仍读不到时，**必须报出来**。
+ * 之前的实现是 `catch { continue; }` —— 一次瞬时网络抖动就静默少一个插件，
+ * 用户看到的是不完整的列表却毫不知情。
+ */
+check('发现结果里 unreadable 非空时给出警告', () => {
+  const unreadableSeeds = [seedUrl, false, { ...fakeResult, unreadable: ['dsh-lexiang/package.json'] }, '', '', {}, fakeLocal, []];
+  const { mod: seeded } = build(unreadableSeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const text = collectText(rendered, []).join(' | ');
+  if (!text.includes('dsh-lexiang/package.json')) throw new Error('没有报出读不到的 package.json：' + text.slice(0, 300));
+  if (!/读不到|可能不全/.test(text)) throw new Error('没有给出"列表可能不全"的提示');
 });
 
 // ── 汇总 ─────────────────────────────────────────────────────────────────
