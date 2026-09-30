@@ -1,0 +1,5 @@
+# Bundle layer contributed by dsh-plugin-url.
+# Installed automatically when a profile lists this bundle.
+- insert:
+    - id: plugin-url
+      name: dsh-plugin-url
