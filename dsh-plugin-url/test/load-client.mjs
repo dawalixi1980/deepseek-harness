@@ -230,7 +230,7 @@ check('远程贡献 package 为 dsh-plugin-url', () => {
 check('远程描述符线名齐全且含 installPlugin / uninstallPlugin', () => {
   if (!Array.isArray(mounted?.descriptors)) throw new Error('descriptors 不是数组');
   const methods = mounted.descriptors.map((d) => d.method).sort();
-  const expected = ['forgetUrl', 'inspect', 'installPlugin', 'listInstalled', 'recentUrls', 'rememberUrl', 'uninstallPlugin'];
+  const expected = ['backgroundStatus', 'forgetUrl', 'inspect', 'installPlugin', 'listInstalled', 'recentUrls', 'rememberUrl', 'searchCommunity', 'uninstallPlugin'];
   if (JSON.stringify(methods) !== JSON.stringify(expected)) throw new Error('method = ' + JSON.stringify(methods));
 });
 check('注册了 settings.section 分区', () => {
@@ -246,7 +246,7 @@ check('注册的组件就是导出的 PluginUrlSection', () => {
 check('分区 face 暴露 installPlugin / uninstallPlugin 而不是 install / uninstall', () => {
   if (typeof registeredSection.inject !== 'function') throw new Error('分区没有 inject（face 工厂）');
   const face = registeredSection.inject();
-  for (const name of ['installPlugin', 'uninstallPlugin', 'inspect', 'listInstalled', 'rememberUrl', 'recentUrls', 'forgetUrl']) {
+  for (const name of ['installPlugin', 'uninstallPlugin', 'inspect', 'listInstalled', 'rememberUrl', 'recentUrls', 'forgetUrl', 'searchCommunity', 'backgroundStatus']) {
     if (typeof face?.[name] !== 'function') throw new Error('face.' + name + ' 缺失');
   }
   if (face.install !== undefined) throw new Error('face 上还有旧线名 install');
@@ -332,7 +332,12 @@ function buttonsIn(node) {
  * 映射值取自 lib/client.js 的 zh 字典（readiness 三态标签），
  * 改文案会让断言失败 —— 这是契约，不是脆弱。
  */
-const ZH = { ready: '可直接装', needsBuild: '需要构建', missingEntry: '缺入口产物' };
+const ZH = {
+  ready: '可直接装', needsBuild: '需要构建', missingEntry: '缺入口产物',
+  communitySearch: '搜索社区插件', communityView: '查看插件', communityTitle: '社区插件',
+  communityStars: '{n} 星', communityFound: '共 {n} 个仓库（第 {page} 页）',
+  bgTitle: '后台任务', bgRunning: '进行中', bgDone: '已完成', bgFailed: '失败', bgElapsed: '{n} 秒',
+};
 const t = (key) => (key in ZH ? ZH[key] : key);
 
 const seedUrl = 'https://github.com/dawalixi1980/deepseek-harness';
@@ -343,6 +348,7 @@ const fakeResult = {
   ref: 'main',
   subpath: '',
   cached: false,
+  method: 'tree',
   totalScanned: 3,
   plugins: [
     {
@@ -376,12 +382,58 @@ const fakeLocal = [
   },
 ];
 
+// 社区检索结果（topic:dsh-plugin）。名字刻意不与被发现插件/已装列表重叠。
+const fakeCommunity = {
+  query: 'topic:dsh-plugin',
+  page: 1,
+  total: 16732,
+  cached: false,
+  items: [
+    {
+      fullName: 'awesome-dsh-plugin/awesome-dsh-plugin', owner: 'awesome-dsh-plugin', repo: 'awesome-dsh-plugin',
+      description: '精选插件列表', stars: 17379, forks: 3434, updatedAt: '2026-09-29T16:28:58Z',
+      defaultBranch: 'main', archived: false, topics: ['dsh-plugin'],
+    },
+    {
+      fullName: 'tt-a1i/archify', owner: 'tt-a1i', repo: 'archify',
+      description: '架构图技能', stars: 74618, forks: 5011, updatedAt: '2026-09-30T07:53:50Z',
+      defaultBranch: 'main', archived: true, topics: ['dsh-plugin'],
+    },
+  ],
+};
+
+// 后台任务快照（host 侧任务表）。用来验证「关掉设置再回来能续上」。
+const fakeBackground = {
+  jobs: [
+    {
+      id: 'job-1', kind: 'inspect', url: seedUrl, subpath: '', label: 'dawalixi1980/deepseek-harness',
+      phase: 'running', startedAt: Date.now() - 4000, endedAt: 0, error: '',
+      summary: '正在扫描 dawalixi1980/deepseek-harness',
+    },
+    {
+      id: 'job-2', kind: 'install', url: 'https://github.com/x/y', subpath: 'pkgs/a', label: 'x/y:pkgs/a',
+      phase: 'failed', startedAt: Date.now() - 9000, endedAt: Date.now() - 8000, error: '装不上：boom',
+      summary: 'x/y:pkgs/a 失败',
+    },
+  ],
+  results: [{ url: seedUrl, label: 'dawalixi1980/deepseek-harness', at: 1, result: fakeResult }],
+};
+
 // 按组件内 useState 的声明顺序预置初值：
 // url, busy, result, error, notice, pending, local, sites
 const seeds = [seedUrl, false, fakeResult, '', '', {}, fakeLocal, []];
 
+// 社区块要额外预置后 4 个 hook：communityKeywords, communityPage, community, communityBusy
+const communitySeeds = [...seeds, 'diagram', 2, fakeCommunity, false];
+
+// 再往后是 jobs（后台任务快照）
+const backgroundSeeds = [...communitySeeds, fakeBackground.jobs];
+
+// 「刚打开面板」的形态：本地还没有结果，全靠后台快照恢复
+const coldSeeds = [seedUrl, false, null, '', '', {}, fakeLocal, [], '', 1, null, false];
+
 /** 记录 face 被调用情况；同时挂上旧线名 install / uninstall 以证明没人再调它们。 */
-const calls = { inspect: [], installPlugin: [], uninstallPlugin: [], listInstalled: 0, install: [], uninstall: [] };
+const calls = { inspect: [], installPlugin: [], uninstallPlugin: [], listInstalled: 0, install: [], uninstall: [], searchCommunity: [], backgroundStatus: 0 };
 function makeFace(overrides = {}) {
   return {
     inspect: async (url) => { calls.inspect.push(url); return fakeResult; },
@@ -397,6 +449,8 @@ function makeFace(overrides = {}) {
     recentUrls: async () => ({ sites: [] }),
     rememberUrl: async () => ({ sites: [] }),
     forgetUrl: async () => ({ sites: [] }),
+    searchCommunity: async (keywords, page) => { calls.searchCommunity.push([keywords, page]); return fakeCommunity; },
+    backgroundStatus: async () => { calls.backgroundStatus += 1; return fakeBackground; },
     currentSessionId: () => 'test-session',
     // 改名前的线名：留在 face 上，一旦面板还在调它，下面的断言就会响。
     install: async () => { calls.install.push('install'); return { ok: true }; },
@@ -410,6 +464,8 @@ function resetCalls() {
   calls.uninstallPlugin.length = 0;
   calls.install.length = 0;
   calls.uninstall.length = 0;
+  calls.searchCommunity.length = 0;
+  calls.backgroundStatus = 0;
   calls.listInstalled = 0;
 }
 
@@ -572,6 +628,89 @@ check('已装项 removable!==true 时卸载按钮 disabled', () => {
   const [button] = buttonsIn(card);
   if (button === undefined) throw new Error('卡片里找不到卸载按钮');
   if (button.props.disabled !== true) throw new Error('removable 为 false 却没被禁用：disabled = ' + button.props.disabled);
+});
+
+// ── 社区插件检索 ─────────────────────────────────────────────────────────
+/** 社区结果列表：仓库全名 / 星数 / 总数都要真的渲染出来。 */
+check('社区检索结果可渲染（仓库名 / 星数 / 总数）', () => {
+  const { mod: seeded } = build(communitySeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const text = collectText(rendered, []).join(' | ');
+  if (!text.includes('awesome-dsh-plugin/awesome-dsh-plugin')) throw new Error('没渲染出仓库全名：' + text.slice(0, 200));
+  if (!text.includes('tt-a1i/archify')) throw new Error('没渲染出第二个仓库');
+  if (!text.includes('74618')) throw new Error('没渲染出星数');
+  if (!text.includes('16732')) throw new Error('没渲染出总数');
+  if (!text.includes(ZH.communityTitle)) throw new Error('没渲染出社区标题');
+});
+
+/** 搜索按钮：必须调 face.searchCommunity(关键词, 1) —— 从第 1 页开始。 */
+check('搜索按钮调用 face.searchCommunity(关键词, 1)', () => {
+  resetCalls();
+  // 社区状态留空（null），只保留关键词，验证「点按钮才请求」
+  const { mod: seeded } = build([...seeds, 'mermaid', 1, null, false]);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const buttons = buttonsIn(rendered).filter((b) => collectText(b, []).join('') === ZH.communitySearch);
+  if (buttons.length !== 1) throw new Error('找不到「' + ZH.communitySearch + '」按钮（命中 ' + buttons.length + ' 个）');
+  if (calls.searchCommunity.length !== 0) throw new Error('还没点按钮就发起了检索（输入即搜会烧光配额）');
+  buttons[0].props.onClick();
+  if (calls.searchCommunity.length !== 1) throw new Error('searchCommunity 调用次数 = ' + calls.searchCommunity.length);
+  if (calls.searchCommunity[0][0] !== 'mermaid') throw new Error('关键词 = ' + calls.searchCommunity[0][0]);
+  if (calls.searchCommunity[0][1] !== 1) throw new Error('页码 = ' + calls.searchCommunity[0][1]);
+});
+
+/**
+ * 「查看插件」必须把仓库地址填进输入框并直接触发 inspect（复用同一条发现流程），
+ * 而不是另起一套下载逻辑。
+ */
+check('社区结果「查看插件」填地址并触发 inspect', () => {
+  resetCalls();
+  const { mod: seeded } = build(communitySeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const card = cardWithText(rendered, 'tt-a1i/archify');
+  const [button] = buttonsIn(card);
+  if (button === undefined) throw new Error('社区卡片里找不到按钮');
+  if (collectText(button, []).join('') !== ZH.communityView) throw new Error('按钮文字 = ' + collectText(button, []).join(''));
+  button.props.onClick();
+  if (calls.inspect.length !== 1) throw new Error('inspect 调用次数 = ' + calls.inspect.length);
+  if (!String(calls.inspect[0]).includes('github.com/tt-a1i/archify')) throw new Error('inspect 地址 = ' + calls.inspect[0]);
+});
+
+// ── 后台任务（关掉设置再回来能续上）─────────────────────────────────────
+/** 挂载时必须读一次 host 的后台状态，否则"续上"无从谈起。 */
+check('挂载时读一次后台状态', () => {
+  resetCalls();
+  const { mod: seeded } = build(seeds, { runEffects: true });
+  seeded.PluginUrlSection({ ...makeFace(), t });
+  if (calls.backgroundStatus < 1) throw new Error('挂载没有调用 face.backgroundStatus');
+});
+
+/** 任务条：状态、耗时、失败原因都要真的渲染出来。 */
+check('后台任务条渲染出任务状态与耗时', () => {
+  const { mod: seeded } = build(backgroundSeeds);
+  const rendered = seeded.PluginUrlSection({ ...makeFace(), t });
+  const text = collectText(rendered, []).join(' | ');
+  if (!text.includes(ZH.bgTitle)) throw new Error('没有后台任务标题：' + text.slice(0, 200));
+  if (!text.includes('正在扫描 dawalixi1980/deepseek-harness')) throw new Error('没有显示进行中的任务');
+  if (!text.includes(ZH.bgFailed)) throw new Error('没有显示失败状态');
+  if (!text.includes('装不上：boom')) throw new Error('没有显示失败原因');
+  if (!/\d+ 秒/.test(text)) throw new Error('没有显示耗时：' + text.slice(0, 300));
+});
+
+/**
+ * 最关键的一条：**冷启动（本地没有结果）时，必须从后台快照把上次的发现结果捞回来，
+ * 而且不能重新扫一遍**。这正是用户抱怨的"一退出设置就得重来"。
+ */
+check('重开面板能续上后台结果且不重新扫描', async () => {
+  resetCalls();
+  const { reactApi, mod: seeded } = build(coldSeeds, { runEffects: true });
+  renderWith(reactApi, seeded.PluginUrlSection, { ...makeFace(), t });
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const rendered = renderWith(reactApi, seeded.PluginUrlSection, { ...makeFace(), t });
+  const text = collectText(rendered, []).join(' | ');
+  if (!text.includes('dsh-docx')) throw new Error('没有从后台快照恢复出插件列表：' + text.slice(0, 250));
+  if (calls.inspect.length !== 0) throw new Error('恢复过程不该重新扫描，但 inspect 被调了 ' + calls.inspect.length + ' 次');
 });
 
 // ── 汇总 ─────────────────────────────────────────────────────────────────

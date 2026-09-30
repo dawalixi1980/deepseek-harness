@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-url",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Paste a GitHub URL, discover every DSH plugin package inside it, then install / uninstall each one from a settings panel.",
   "license": "MIT",
   "type": "module",
@@ -23,7 +23,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/scan.test.mjs && node test/tarball.test.mjs && node test/load-client.mjs && node test/validate-typert-contract.mjs"
+    "test": "node test/scan.test.mjs && node test/tarball.test.mjs && node test/community.test.mjs && node test/tree-scan.test.mjs && node test/load-client.mjs && node test/validate-typert-contract.mjs"
   },
   "dsh": {
     "client": {

@@ -123,7 +123,28 @@ window.__ModuleLoader__.load({
 			deps: "{n} 个依赖",
 			notRemovable: "受管理保护，不能从面板卸载",
 			reloadHint: "安装会重载 profile：面板若闪一下属正常，插件已经生效。",
-			afterInstall: "{name} — 已安装，如刚生效请刷新页面查看。"
+			afterInstall: "{name} — 已安装，如刚生效请刷新页面查看。",
+			communityTitle: "社区插件",
+			communityHint: "按 GitHub 话题 dsh-plugin 检索（按星数排序），可追加关键词，例如 markdown、diagram。结果只是候选仓库 —— 挂着话题不等于真是插件，点「查看插件」扫过 dsh.bundle 才算数。",
+			communityPlaceholder: "追加关键词（留空 = 按星数浏览全部）",
+			communitySearch: "搜索社区插件",
+			communitySearching: "正在检索…",
+			communityFound: "共 {n} 个仓库（第 {page} 页）",
+			communityCached: "缓存命中",
+			communityStars: "{n} 星",
+			communityUpdated: "更新于 {when}",
+			communityView: "查看插件",
+			communityEmpty: "这个话题下没有找到仓库。换个关键词试试。",
+			communityMore: "下一页",
+			communityNoToken: "未认证检索，GitHub 限制 10 次/分钟；同一次搜索 10 分钟内走缓存。",
+			methodTree: "轻量扫描",
+			methodArchive: "整包扫描（回退）",
+			bgTitle: "后台任务",
+			bgRunning: "进行中",
+			bgDone: "已完成",
+			bgFailed: "失败",
+			bgElapsed: "{n} 秒",
+			bgHint: "关掉设置不会中断：任务跑在 host 进程里，重开这一页会自动接上。"
 		};
 		const en = {
 			nav: "Install plugins from URL",
@@ -168,7 +189,28 @@ window.__ModuleLoader__.load({
 			deps: "{n} deps",
 			notRemovable: "Protected, cannot be removed from the panel",
 			reloadHint: "Installing reloads the profile: a brief flicker is normal and the plugin is live.",
-			afterInstall: "{name} — installed; refresh the page if it just took effect."
+			afterInstall: "{name} — installed; refresh the page if it just took effect.",
+			communityTitle: "Community plugins",
+			communityHint: "Searches the GitHub topic dsh-plugin (sorted by stars); append keywords such as markdown or diagram. Results are candidate repositories only — carrying the topic does not prove it is a plugin, so \"View plugins\" scans for dsh.bundle first.",
+			communityPlaceholder: "Extra keywords (empty = browse all by stars)",
+			communitySearch: "Search community",
+			communitySearching: "Searching…",
+			communityFound: "{n} repositories (page {page})",
+			communityCached: "cached",
+			communityStars: "{n} stars",
+			communityUpdated: "updated {when}",
+			communityView: "View plugins",
+			communityEmpty: "No repository found under this topic. Try another keyword.",
+			communityMore: "Next page",
+			communityNoToken: "Unauthenticated search: GitHub allows 10 requests/minute; the same search is cached for 10 minutes.",
+			methodTree: "fast scan",
+			methodArchive: "full archive (fallback)",
+			bgTitle: "Background tasks",
+			bgRunning: "running",
+			bgDone: "done",
+			bgFailed: "failed",
+			bgElapsed: "{n}s",
+			bgHint: "Closing settings does not stop these: they run in the Host process, and reopening this page picks them up."
 		};
 
 		/**
@@ -244,6 +286,25 @@ window.__ModuleLoader__.load({
 					invocation: { kind: "direct" },
 					parameters: [{ name: "url", wire: "url", source: "json", codec: codec("dsh-plugin-url#UrlText") }],
 					result: codec("dsh-plugin-url#SavedSitesResult")
+				},
+				{
+					// 社区检索：topic:dsh-plugin（可追加关键词）
+					id: "dsh-plugin-url#pluginUrl/searchCommunity",
+					service: "pluginUrl", namespace: "pluginUrl", method: "searchCommunity",
+					invocation: { kind: "direct" },
+					parameters: [
+						{ name: "keywords", wire: "keywords", source: "json", codec: codec("dsh-plugin-url#Keywords") },
+						{ name: "page", wire: "page", source: "json", codec: codec("dsh-plugin-url#Page") }
+					],
+					result: codec("dsh-plugin-url#SearchCommunityResult")
+				},
+				{
+					// 后台任务状态：面板挂载时先读它，实现「关掉再开、原地续上」
+					id: "dsh-plugin-url#pluginUrl/backgroundStatus",
+					service: "pluginUrl", namespace: "pluginUrl", method: "backgroundStatus",
+					invocation: { kind: "direct" },
+					parameters: [],
+					result: codec("dsh-plugin-url#BackgroundStatusResult")
 				}
 			]
 		};
@@ -269,6 +330,17 @@ window.__ModuleLoader__.load({
 			const [pending, setPending] = react.useState({});
 			const [local, setLocal] = react.useState(null);
 			const [sites, setSites] = react.useState([]);
+			/** 社区检索：关键词、页码、结果、是否在查。 */
+			const [communityKeywords, setCommunityKeywords] = react.useState("");
+			const [communityPage, setCommunityPage] = react.useState(1);
+			const [community, setCommunity] = react.useState(null);
+			const [communityBusy, setCommunityBusy] = react.useState(false);
+			/**
+			 * 后台任务（host 侧的任务表快照）。
+			 * 这个面板一退出设置就被卸载、状态全丢；所以「正在扫什么/扫完了什么」
+			 * 以 host 为准，这里只是它的一份投影。
+			 */
+			const [jobs, setJobs] = react.useState([]);
 
 			const applySites = (list) => setSites(Array.isArray(list) ? list : []);
 
@@ -309,6 +381,58 @@ window.__ModuleLoader__.load({
 
 			react.useEffect(() => { refreshLocal(); }, [refreshLocal]);
 
+			/**
+			 * 读一次 host 的后台状态。
+			 *
+			 * 这是「关掉设置再回来能续上」的关键：面板刚挂载时本地 result 是空的，
+			 * 就从这里的 results 里把上次扫出来的东西捞回来；有任务在跑就显示进度。
+			 * 本地已有结果时不覆盖 —— 用户刚点的那次结果更新。
+			 */
+			const refreshStatus = react.useCallback(() => {
+				try {
+					if (typeof face?.backgroundStatus !== "function") return;
+					Promise.resolve(face.backgroundStatus())
+						.then((snapshot) => {
+							const list = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
+							setJobs(list);
+
+							const results = Array.isArray(snapshot?.results) ? snapshot.results : [];
+							if (results.length === 0) return;
+							const current = String(url ?? "").trim();
+							// 优先捞「当前输入框那个 URL」的结果；输入框为空就用最近一条
+							const hit = results.find((entry) => entry.url === current)
+								?? (current.length === 0 ? results[0] : undefined);
+							if (hit === undefined) return;
+							if (current.length === 0) setUrl(String(hit.url));
+							setResult((previous) => (previous === null ? hit.result : previous));
+						})
+						.catch(() => {});
+				} catch { /* 读不到就当没有 */ }
+			}, [face, url]);
+
+			// 挂载时先续上后台状态（关掉设置再回来 = 原地接着看）
+			react.useEffect(() => { refreshStatus(); }, [refreshStatus]);
+
+			/**
+			 * 有活儿在跑就轮询（1.5 秒一次）。纯本地 RPC，不碰 GitHub 配额。
+			 * 没活儿时定时器会被清掉，不会一直空转。
+			 */
+			const anyRunning = jobs.some((job) => job.phase === "running")
+				|| busy
+				|| communityBusy
+				|| Object.keys(pending).length > 0;
+			react.useEffect(() => {
+				if (!anyRunning) return undefined;
+				const timer = setInterval(refreshStatus, 1500);
+				return () => clearInterval(timer);
+			}, [anyRunning, refreshStatus]);
+
+			// 任务从「在跑」变成「跑完」时，把已装列表刷新一下
+			const finishedCount = jobs.filter((job) => job.phase !== "running").length;
+			react.useEffect(() => {
+				if (finishedCount > 0) refreshLocal();
+			}, [finishedCount, refreshLocal]);
+
 			// 挂载时读已保存的网址，并把上次用过的填进输入框
 			react.useEffect(() => {
 				try {
@@ -333,6 +457,43 @@ window.__ModuleLoader__.load({
 				setBusy(true); setError(""); setNotice(""); setResult(null);
 				Promise.resolve(face.inspect(text))
 					.then((r) => { setResult(r); refreshLocal(); saveSite(text, true); })
+					.catch((e) => setError(String(e?.message ?? e)))
+					.finally(() => setBusy(false));
+			};
+
+			/**
+			 * 社区检索。只在点按钮时触发（不做输入即搜）—— 未认证的搜索 API 只有
+			 * 10 次/分钟，输入即搜会几秒就把配额烧光。
+			 */
+			const searchCommunity = (page) => {
+				if (typeof face?.searchCommunity !== "function") {
+					setError("pluginUrl 服务不可用（host 半可能未加载）");
+					return;
+				}
+				const target = Math.max(1, Math.floor(Number(page) || 1));
+				setCommunityBusy(true); setError("");
+				Promise.resolve(face.searchCommunity(communityKeywords.trim(), target))
+					.then((r) => {
+						setCommunity(r);
+						setCommunityPage(r?.page ?? target);
+					})
+					.catch((e) => setError(String(e?.message ?? e)))
+					.finally(() => setCommunityBusy(false));
+			};
+
+			/** 点「查看插件」：把仓库地址填进上面的输入框并立刻扫一遍，复用同一条发现流程。 */
+			const viewRepoPlugins = (repo) => {
+				const next = "https://github.com/" + repo.fullName;
+				setUrl(next);
+				setError(""); setNotice("");
+				setResult(null);
+				if (typeof face?.inspect !== "function") {
+					setError("pluginUrl 服务不可用（host 半可能未加载）");
+					return;
+				}
+				setBusy(true);
+				Promise.resolve(face.inspect(next))
+					.then((r) => { setResult(r); refreshLocal(); saveSite(next, true); })
 					.catch((e) => setError(String(e?.message ?? e)))
 					.finally(() => setBusy(false));
 			};
@@ -422,6 +583,39 @@ window.__ModuleLoader__.load({
 				jsx("p", { className: c.hint, children: t("hint") }),
 				jsx("p", { className: c.hint, children: t("reloadHint") }),
 
+				// ── 后台任务条 ────────────────────────────────────────────
+				// 面板会被卸载，但 host 的任务不会。这里只是它的一份投影，
+				// 所以关掉设置再回来，卡片还在、还在跑。
+				jobs.length === 0
+					? null
+					: jsx("div", { children: [
+						jsx("div", { className: c.groupHead, children: [
+							jsx("span", { className: c.groupLabel, children: t("bgTitle") }),
+							jsx("span", { className: c.count, children: String(jobs.length) })
+						] }),
+						jsx("p", { className: c.hint, children: t("bgHint") }),
+						jsx("ul", { className: c.cards, children: jobs.map((job) => {
+							const elapsed = Math.max(0, Math.round(((job.endedAt > 0 ? job.endedAt : Date.now()) - job.startedAt) / 1000));
+							const label = job.phase === "running"
+								? t("bgRunning")
+								: (job.phase === "failed" ? t("bgFailed") : t("bgDone"));
+							return jsx("li", { key: job.id, className: c.card, children: [
+								jsx("div", { className: c.cardMain, children: [
+									jsx("div", { className: c.cardTitle, children: [
+										jsx("span", { className: c.name, children: job.summary }),
+										jsx("span", {
+											className: c.tag,
+											"data-kind": job.phase === "running" ? "src" : (job.phase === "failed" ? "warn" : undefined),
+											children: label
+										}),
+										jsx("span", { className: c.tag, children: t("bgElapsed").replace("{n}", String(elapsed)) })
+									] }),
+									job.error.length > 0 ? jsx("p", { className: c.desc, children: job.error }) : null
+								] })
+							] });
+						}) })
+					] }),
+
 				jsx("div", { className: c.row, children: [
 					jsx("input", {
 						className: c.input,
@@ -463,6 +657,68 @@ window.__ModuleLoader__.load({
 						: null
 				] }),
 
+				// ── 社区插件检索 ───────────────────────────────────────────
+				jsx("div", { className: c.groupHead, children: [
+					jsx("span", { className: c.groupLabel, children: t("communityTitle") }),
+					jsx("span", { className: c.count, children: "topic:dsh-plugin" })
+				] }),
+				jsx("p", { className: c.hint, children: t("communityHint") }),
+				jsx("div", { className: c.row, children: [
+					jsx("input", {
+						className: c.input,
+						type: "text",
+						value: communityKeywords,
+						placeholder: t("communityPlaceholder"),
+						spellCheck: false,
+						onChange: (e) => setCommunityKeywords(e.target.value),
+						onKeyDown: (e) => { if (e.key === "Enter" && !communityBusy) searchCommunity(1); }
+					}),
+					jsx("button", {
+						className: c.btn,
+						"data-kind": "primary",
+						disabled: communityBusy,
+						onClick: () => searchCommunity(1),
+						children: communityBusy ? t("communitySearching") : t("communitySearch")
+					})
+				] }),
+				jsx("p", { className: c.hint, children: t("communityNoToken") }),
+
+				community === null
+					? null
+					: jsx(Fragment, { children: [
+						jsx("div", { className: c.meta, children: [
+							jsx("span", { className: c.count, children: t("communityFound").replace("{n}", String(community.total)).replace("{page}", String(community.page)) }),
+							community.cached ? jsx("span", { className: c.tag, children: t("communityCached") }) : null
+						] }),
+						community.items.length === 0
+							? jsx("p", { className: c.empty, children: t("communityEmpty") })
+							: jsx("ul", { className: c.cards, children: community.items.map((repo) => jsx("li", { key: repo.fullName, className: c.card, children: [
+								jsx("div", { className: c.cardMain, children: [
+									jsx("div", { className: c.cardTitle, children: [
+										jsx("span", { className: c.name, children: repo.fullName }),
+										jsx("span", { className: c.tag, children: t("communityStars").replace("{n}", String(repo.stars)) }),
+										repo.archived ? jsx("span", { className: c.tag, "data-kind": "warn", children: "archived" }) : null
+									] }),
+									jsx("div", { className: c.path, children: t("communityUpdated").replace("{when}", repo.updatedAt.length >= 10 ? repo.updatedAt.slice(0, 10) : repo.updatedAt) }),
+									repo.description.length > 0 ? jsx("p", { className: c.desc, children: repo.description }) : null
+								] }),
+								jsx("div", { className: c.side, children: jsx("button", {
+									className: c.btn,
+									disabled: busy,
+									onClick: () => viewRepoPlugins(repo),
+									children: t("communityView")
+								}) })
+							] })) }),
+						community.items.length > 0
+							? jsx("div", { className: c.row, children: jsx("button", {
+								className: c.btn,
+								disabled: communityBusy,
+								onClick: () => searchCommunity(communityPage + 1),
+								children: t("communityMore")
+							}) })
+							: null
+					] }),
+
 				error.length > 0 ? jsx("p", { className: c.msg, "data-kind": "err", children: error }) : null,
 				notice.length > 0 ? jsx("p", { className: c.msg, "data-kind": "ok", children: notice }) : null,
 				busy ? jsx("p", { className: c.spin, children: t("finding") }) : null,
@@ -474,6 +730,9 @@ window.__ModuleLoader__.load({
 							jsx("span", { className: c.tag, children: t("ref") + " " + result.ref }),
 							result.subpath.length > 0 ? jsx("span", { className: c.tag, children: t("path") + " " + result.subpath }) : null,
 							result.cached ? jsx("span", { className: c.tag, children: t("cached") }) : null,
+							result.method === "archive"
+								? jsx("span", { className: c.tag, "data-kind": "warn", children: t("methodArchive") })
+								: jsx("span", { className: c.tag, children: t("methodTree") }),
 							jsx("span", { className: c.count, children: t("found").replace("{n}", String(found.length)) })
 						] }),
 						found.length === 0
@@ -552,6 +811,8 @@ window.__ModuleLoader__.load({
 				listInstalled: () => callRemote("listInstalled"),
 				rememberUrl: (url) => callRemote("rememberUrl", url),
 				recentUrls: () => callRemote("recentUrls"),
+				searchCommunity: (keywords, page) => callRemote("searchCommunity", keywords, page),
+				backgroundStatus: () => callRemote("backgroundStatus"),
 				forgetUrl: (url) => callRemote("forgetUrl", url)
 			});
 

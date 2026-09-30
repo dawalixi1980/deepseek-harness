@@ -222,8 +222,10 @@ async function loadHostManifest() {
 	await writeFile(join(tmpRoot, "package.json"), '{ "type": "module" }\n');
 	// 复制真实源码（字节相同），只为给它配一份最小依赖树。
 	// index.js 顶层 import 了 zod / @deepseek-ai/dsh-typert-protocol（纯 Node 下不存在），
-	// 以及同目录的 discover.js / scan.js / tarball.js —— 少一个都 import 不了。
-	for (const file of ["index.js", "discover.js", "scan.js", "tarball.js"]) {
+	// 以及同目录的 discover.js / scan.js / tarball.js / community.js / tree-scan.js —— 少一个都 import 不了。
+	// 以后 index.js 再新增同目录 import，这里也要跟着加，否则会以
+	// "Cannot find module '.../xxx.js'" 的形式整片报红。
+	for (const file of ["index.js", "discover.js", "scan.js", "tarball.js", "community.js", "tree-scan.js"]) {
 		await copyFile(join(pluginRoot, "lib", file), join(tmpRoot, file));
 	}
 
@@ -295,7 +297,7 @@ check("远程方法名不撞 RemoteNamespaceService 原型（host 半）", () =>
 
 check("host 线名与面板约定一致（pluginUrl + installPlugin / uninstallPlugin）", () => {
 	const methods = manifest.invocations.map((value) => value.method).sort();
-	const expected = ["forgetUrl", "inspect", "installPlugin", "listInstalled", "recentUrls", "rememberUrl", "uninstallPlugin"];
+	const expected = ["backgroundStatus", "forgetUrl", "inspect", "installPlugin", "listInstalled", "recentUrls", "rememberUrl", "searchCommunity", "uninstallPlugin"];
 	if (JSON.stringify(methods) !== JSON.stringify(expected)) throw new Error("method = " + JSON.stringify(methods));
 	for (const invocation of manifest.invocations) {
 		if (invocation.namespace !== "pluginUrl") throw new Error(`${invocation.id} 的 namespace = ${invocation.namespace}`);

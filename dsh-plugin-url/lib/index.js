@@ -30,6 +30,8 @@ import {
 } from "./discover.js";
 import { scanPluginPackages } from "./scan.js";
 import { buildNpmTarball } from "./tarball.js";
+import { searchCommunity } from "./community.js";
+import { scanViaTree } from "./tree-scan.js";
 
 export const name = "plugin-url";
 /** 没有插件管理器这个插件毫无意义：它同时也是我们安装动作的执行者。 */
@@ -39,6 +41,8 @@ export const inject = ["pluginManager", "typert"];
 const STATE_FILE = "dsh-plugin-url.json";
 /** 最多保存多少条仓库网址。 */
 const MAX_SAVED_SITES = 12;
+/** 后台任务表最多留多少条（进程内，重启即清）。 */
+const MAX_BACKGROUND_JOBS = 10;
 
 function resolveDshHome() {
   const env = process.env.DSH_HOME;
@@ -189,6 +193,8 @@ const inspectResultSchema = z.object({
   plugins: z.array(discoveredPluginSchema),
   totalScanned: z.number(),
   cached: z.boolean(),
+  /** 走的是哪条发现路线：tree = 轻量路径清单，archive = 下载整包归档回退。 */
+  method: z.string(),
 });
 
 const installResultSchema = z.object({
@@ -229,6 +235,58 @@ const savedSiteSchema = z.object({
 });
 
 const savedSitesResultSchema = z.object({ sites: z.array(savedSiteSchema) });
+
+/**
+ * 社区检索结果里的一条仓库。
+ * 注意：这里只描述**仓库本身**，不代表它一定是 DSH 插件 —— topic 不能当证据，
+ * 点开扫过 dsh.bundle 才算数。
+ */
+const communityRepoSchema = z.object({
+  fullName: z.string(),
+  owner: z.string(),
+  repo: z.string(),
+  description: z.string(),
+  stars: z.number(),
+  forks: z.number(),
+  updatedAt: z.string(),
+  defaultBranch: z.string(),
+  archived: z.boolean(),
+  topics: z.array(z.string()),
+});
+
+const searchCommunityResultSchema = z.object({
+  query: z.string(),
+  page: z.number(),
+  total: z.number(),
+  items: z.array(communityRepoSchema),
+  cached: z.boolean(),
+});
+
+/** 一条后台任务（客户端只读展示）。 */
+const backgroundJobSchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  url: z.string(),
+  subpath: z.string(),
+  label: z.string(),
+  phase: z.string(),
+  startedAt: z.number(),
+  endedAt: z.number(),
+  error: z.string(),
+  summary: z.string(),
+});
+
+const backgroundStatusResultSchema = z.object({
+  jobs: z.array(backgroundJobSchema),
+  results: z.array(
+    z.object({
+      url: z.string(),
+      label: z.string(),
+      at: z.number(),
+      result: inspectResultSchema,
+    }),
+  ),
+});
 
 /**
  * 远程 schema codec 工厂。
@@ -324,6 +382,30 @@ const MANIFEST = {
       ],
       result: codec("dsh-plugin-url#SavedSitesResult", savedSitesResultSchema),
     },
+    {
+      // 社区检索：按 topic:dsh-plugin（可追加关键词）找候选仓库。
+      // 只返回仓库元信息，不做"这是不是插件"的判断 —— 那要等点开扫过。
+      id: "dsh-plugin-url#pluginUrl/searchCommunity",
+      service: "pluginUrl",
+      namespace: "pluginUrl",
+      method: "searchCommunity",
+      invocation: { kind: "direct" },
+      parameters: [
+        { name: "keywords", wire: "keywords", source: "json", codec: codec("dsh-plugin-url#Keywords", z.string()) },
+        { name: "page", wire: "page", source: "json", codec: codec("dsh-plugin-url#Page", z.number()) },
+      ],
+      result: codec("dsh-plugin-url#SearchCommunityResult", searchCommunityResultSchema),
+    },
+    {
+      // 后台任务状态：面板挂载时先读它，就能「关掉再开、原地续上」。
+      id: "dsh-plugin-url#pluginUrl/backgroundStatus",
+      service: "pluginUrl",
+      namespace: "pluginUrl",
+      method: "backgroundStatus",
+      invocation: { kind: "direct" },
+      parameters: [],
+      result: codec("dsh-plugin-url#BackgroundStatusResult", backgroundStatusResultSchema),
+    },
   ],
   model: { services: [], events: [], objects: [] },
 };
@@ -334,6 +416,19 @@ class PluginUrlGateway extends TypertRemoteService {
   constructor(ctx) {
     super(ctx, "pluginUrl");
     this.hostCtx = ctx;
+    /**
+     * 后台任务表（进程内，重启即清）。
+     *
+     * 为什么要有它：设置页那个面板是一个 React 组件，用户一退出设置组件就卸载，
+     * 它手里的状态全没了 —— 但**真正干活的 host 进程一直在跑**。所以把"正在干什么 /
+     * 干完了什么"记录在这里，面板重开时用 backgroundStatus() 原地续上，
+     * 而不是让用户从头再扫一遍。
+     */
+    this.jobs = [];
+    /** 「类型|目标」 -> 正在跑的任务，用来去重（同一个仓库不会下两遍）。 */
+    this.running = new Map();
+    /** 仓库 URL -> 最近一次成功的发现结果（重开面板秒出）。 */
+    this.results = new Map();
   }
 
   /** 每次调用现取，避免持有被替换掉的实例。 */
@@ -341,6 +436,80 @@ class PluginUrlGateway extends TypertRemoteService {
     const pm = this.hostCtx.get("pluginManager");
     if (pm === undefined || pm === null) throw new Error("pluginManager 服务不可用，无法安装插件");
     return pm;
+  }
+
+  /** 一句话状态，客户端直接显示。 */
+  static summaryOf(job) {
+    if (job.phase === "running") {
+      return job.kind === "install" ? `正在安装 ${job.label}` : `正在扫描 ${job.label}`;
+    }
+    if (job.phase === "failed") return `${job.label} 失败`;
+    return job.kind === "install" ? `${job.label} 已安装` : `${job.label} 扫描完成`;
+  }
+
+  /**
+   * 跑一个后台任务；同一把 key 已经在跑就直接接上去，不重复下载。
+   * 任务本身与客户端在不在无关 —— 这正是"关掉面板也继续"的实现方式。
+   */
+  startJob({ kind, key, url, subpath, label }, work) {
+    const existing = this.running.get(key);
+    if (existing !== undefined) return existing.promise;
+
+    const job = {
+      id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind,
+      url,
+      subpath,
+      label,
+      phase: "running",
+      startedAt: Date.now(),
+      endedAt: 0,
+      error: "",
+    };
+    this.jobs.unshift(job);
+    if (this.jobs.length > MAX_BACKGROUND_JOBS) this.jobs.length = MAX_BACKGROUND_JOBS;
+
+    const promise = (async () => {
+      try {
+        const result = await work();
+        job.phase = "done";
+        job.endedAt = Date.now();
+        if (kind === "inspect") this.results.set(url, { url, label, at: job.endedAt, result });
+        return result;
+      } catch (error) {
+        job.phase = "failed";
+        job.endedAt = Date.now();
+        job.error = String(error?.message ?? error);
+        throw error;
+      } finally {
+        this.running.delete(key);
+        job.summary = PluginUrlGateway.summaryOf(job);
+      }
+    })();
+
+    job.promise = promise;
+    this.running.set(key, job);
+    return promise;
+  }
+
+  /** 后台状态：最近的任务 + 最近的发现结果。客户端轮询它。 */
+  backgroundStatus() {
+    const results = [...this.results.values()].sort((a, b) => b.at - a.at);
+    return {
+      jobs: this.jobs.map((job) => ({
+        id: job.id,
+        kind: job.kind,
+        url: job.url,
+        subpath: job.subpath,
+        label: job.label,
+        phase: job.phase,
+        startedAt: job.startedAt,
+        endedAt: job.endedAt,
+        error: job.error,
+        summary: job.summary ?? PluginUrlGateway.summaryOf(job),
+      })),
+      results,
+    };
   }
 
   /** 当前已装 bundle 名集合（用于在发现列表里标「已安装」）。 */
@@ -354,57 +523,106 @@ class PluginUrlGateway extends TypertRemoteService {
   }
 
   /**
-   * 粘贴网址 → 发现插件清单（只读，不落盘）。
-   * 下载与解压都在临时目录，结束后清理。
+   * 粘贴网址 → 发现插件清单。
+   * 外面包一层后台任务：客户端的 promise 就算因为面板关闭而没人接，host 这边照样跑完，
+   * 结果留在 results 里，重开面板用 backgroundStatus() 取回。
+   * 同一个 URL 正在扫时直接接上去，不重复下载。
    */
   async inspect(url) {
     const loc = parseRepoUrl(url);
-    const { buffer, ref, cached } = await fetchArchive(loc.owner, loc.repo, loc.ref, { cacheDir: cacheDir() });
+    return this.startJob(
+      { kind: "inspect", key: `inspect|${url}`, url, subpath: loc.subpath, label: `${loc.owner}/${loc.repo}` },
+      () => this.runInspect(url),
+    );
+  }
 
-    const tempDir = await makeTempDir();
+  /**
+   * 发现的实际实现。两条路线，快的那条优先：
+   *   1. tree 路线（默认）：git trees API 拿路径清单 → 只抓几个 package.json。实测大仓库
+   *      3.5 秒 vs 归档路线 5 分钟以上（仓库 83 MiB 但只有 169 个文件，全压在媒体文件上）。
+   *   2. 归档路线（回退）：路径清单被截断、core API 限流、或 raw 读不到时，退回原来的
+   *      「下载整包 → 解压 → 遍历」，慢但一定能扫全。
+   */
+  async runInspect(url) {
+    const loc = parseRepoUrl(url);
+    const installed = await this.installedNames();
+
+    let found;
+    let ref;
+    let cached;
+    let method;
     try {
-      await extractArchive(buffer, tempDir);
-      let scanDir = tempDir;
-      // subpath 收窄扫描范围时，结果里的 subpath 必须**补回前缀**，
-      // 否则面板显示的是相对子目录的路径，而 installPlugin 是按相对仓库根找的，两边对不上。
-      let prefix = "";
-      if (loc.subpath.length > 0) {
-        const candidate = join(tempDir, loc.subpath);
-        // subpath 不存在时不报错：回退扫全仓库，用户仍能看到能装的东西
-        if (await exists(candidate)) {
-          scanDir = candidate;
-          prefix = loc.subpath;
+      const tree = await scanViaTree(loc.owner, loc.repo, loc.ref, { cacheDir: cacheDir(), subpath: loc.subpath });
+      found = tree.plugins;
+      ref = tree.ref;
+      cached = tree.cached;
+      method = "tree";
+    } catch (error) {
+      // 截断/限流/网络问题都走回退，不让用户卡在"太久了"
+      const { buffer, ref: archiveRef, cached: archiveCached } = await fetchArchive(loc.owner, loc.repo, loc.ref, {
+        cacheDir: cacheDir(),
+      });
+      ref = archiveRef;
+      cached = archiveCached;
+      method = "archive";
+      const tempDir = await makeTempDir();
+      try {
+        await extractArchive(buffer, tempDir);
+        let scanDir = tempDir;
+        // subpath 收窄扫描范围时，结果里的 subpath 必须**补回前缀**，
+        // 否则面板显示的是相对子目录的路径，而 installPlugin 是按相对仓库根找的，两边对不上。
+        let prefix = "";
+        if (loc.subpath.length > 0) {
+          const candidate = join(tempDir, loc.subpath);
+          // subpath 不存在时不报错：回退扫全仓库，用户仍能看到能装的东西
+          if (await exists(candidate)) {
+            scanDir = candidate;
+            prefix = loc.subpath;
+          }
         }
-      }
-      const found = await scanPluginPackages(scanDir);
-      const installed = await this.installedNames();
-      return {
-        owner: loc.owner,
-        repo: loc.repo,
-        ref,
-        subpath: loc.subpath,
-        totalScanned: found.length,
-        cached,
-        plugins: found.map((plugin) => ({
+        found = (await scanPluginPackages(scanDir)).map((plugin) => ({
           ...plugin,
           subpath: prefix.length === 0 ? plugin.subpath : `${prefix}/${plugin.subpath}`,
-          installed: installed.has(plugin.name),
-        })),
-      };
-    } finally {
-      await removeDir(tempDir);
+        }));
+      } finally {
+        await removeDir(tempDir);
+      }
+      void error;
     }
+
+    return {
+      owner: loc.owner,
+      repo: loc.repo,
+      ref,
+      subpath: loc.subpath,
+      totalScanned: found.length,
+      cached,
+      method,
+      plugins: found.map((plugin) => ({ ...plugin, installed: installed.has(plugin.name) })),
+    };
   }
 
   /**
    * 从网址安装一个插件。
-   * 流程：解压 → 定位包目录 → 纯 Node 打 npm tarball → 交给插件管理器安装。
+   * 同样包一层后台任务：安装要下整包 + 打 tarball + 让插件管理器重载 profile，
+   * 慢是正常的 —— 关掉面板不该让它白跑。同一个 (url, subpath) 连点两次也只会跑一次。
    * 方法名不能叫 install（撞客户端 RemoteNamespaceService 原型），故为 installPlugin。
    */
   async installPlugin(url, subpath) {
+    // subpath 允许为空串：那表示「仓库根本身就是插件包」（很常见，比如
+    // elysia395/dsh-wallpaper-engine）。此时 join(tempDir, "") === tempDir，
+    // 下面按包目录校验即可，不能在这里当成"缺参数"拒掉。
     const target = String(subpath ?? "").trim();
-    if (target.length === 0) throw new Error("缺少插件目录（subpath）");
+    const loc = parseRepoUrl(url);
+    const label = target.length === 0 ? `${loc.owner}/${loc.repo}` : `${loc.owner}/${loc.repo}:${target}`;
+    return this.startJob(
+      { kind: "install", key: `install|${url}|${target}`, url, subpath: target, label },
+      () => this.runInstall(url, target),
+    );
+  }
 
+  /** 安装的实际实现。 */
+  async runInstall(url, target) {
     const loc = parseRepoUrl(url);
     const { buffer, ref } = await fetchArchive(loc.owner, loc.repo, loc.ref, { cacheDir: cacheDir() });
 
@@ -515,6 +733,16 @@ class PluginUrlGateway extends TypertRemoteService {
 
     plugins.sort((a, b) => a.name.localeCompare(b.name));
     return { plugins };
+  }
+
+  // ── 社区检索 ───────────────────────────────────────────────────────────
+
+  /**
+   * 按 topic:dsh-plugin 检索社区仓库（可追加关键词）。
+   * 结果只是候选仓库：是不是插件，要等用户点开、走 inspect 扫过 dsh.bundle 才知道。
+   */
+  async searchCommunity(keywords, page) {
+    return searchCommunity(keywords, page, { cacheDir: cacheDir() });
   }
 
   // ── 已保存的仓库网址 ───────────────────────────────────────────────────
