@@ -1,0 +1,5 @@
+# Bundle layer contributed by dsh-restart.
+# Installed automatically when a profile lists this bundle.
+- insert:
+    - id: app-restart
+      name: dsh-restart
