@@ -350,21 +350,64 @@ window.__ModuleLoader__.load({
 			const [hits, setHits] = react.useState(null);
 			const [fatal, setFatal] = react.useState("");
 			const fileRef = react.useRef(null);
+			const folderRef = react.useRef(null);
 			// 根节点 ref：用来在信标里报告「到底渲染出来了什么、可不可见」。
 			// 面板空白时这是唯一能区分「没渲染」和「渲染了但看不见」的办法。
 			const rootRef = react.useRef(null);
 
 			const say = (kind, text) => setMsg({ kind, text });
+
+			/* 面板内的输入/确认浮层，代替 window.prompt / window.confirm。
+			 *
+			 * Electron 渲染进程里这两个原生 API 是禁用的：prompt() 恒返回 null、
+			 * confirm() 恒返回 false，而且都不弹窗、不报错。插件此前用它们拿名称
+			 * 与确认删除，于是「新建文件夹 / 新建页面 / 重命名 / 删除」四个功能
+			 * 全部静默失效 —— 点下去毫无反应，也没有任何提示。
+			 */
+			const [ask, setAsk] = react.useState(null);
+			const askResolveRef = react.useRef(null);
+			const askName = (title, initial) =>
+				new Promise((resolve) => {
+					askResolveRef.current = resolve;
+					setAsk({ kind: "prompt", title, value: initial || "" });
+				});
+			const askConfirm = (title) =>
+				new Promise((resolve) => {
+					askResolveRef.current = resolve;
+					setAsk({ kind: "confirm", title, value: "" });
+				});
+			const settleAsk = (value) => {
+				const fn = askResolveRef.current;
+				askResolveRef.current = null;
+				setAsk(null);
+				if (fn) fn(value);
+			};
+
+			/* 所有远程调用都过这里，并带超时兜底。
+			 *
+			 * 原来只有 try/catch/finally：只要 host 端的某个调用永不 settle，
+			 * finally 就永远不执行，`busy` 停在那一句上再也清不掉；而「新建/上传」
+			 * 按钮的禁用条件正是 `busy !== ""`，于是整个面板变成只读。
+			 */
+			const CALL_TIMEOUT_MS = 30000;
 			const guard = react.useCallback(
 				async (label, fn) => {
 					setBusy(label);
+					let timer = null;
 					try {
-						return await fn();
+						const timeout = new Promise((_, reject) => {
+							timer = setTimeout(
+								() => reject(new Error(`${label} 超时（${CALL_TIMEOUT_MS / 1000}s 未响应），请点「刷新」重试`)),
+								CALL_TIMEOUT_MS
+							);
+						});
+						return await Promise.race([fn(), timeout]);
 					} catch (err) {
 						const m = err && err.message ? err.message : String(err);
 						setMsg({ kind: "err", text: m });
 						return null;
 					} finally {
+						if (timer) clearTimeout(timer);
 						setBusy("");
 					}
 				},
@@ -444,7 +487,31 @@ window.__ModuleLoader__.load({
 				const teamId = ts.teams && ts.teams[0] ? ts.teams[0].id : undefined;
 				const ps = await f.listSpaces({ teamId });
 				setSpaces(ps.spaces || []);
-				// 个人库也放进来，方便一键切换。
+				/* 个人知识库兜底。
+				 *
+				 * 原来这段调 `describeSpace({})` 想拿个人库，但乐享 API 的 `space_id`
+				 * 是必填，空参数必定返回「知识库不存在」（code 50020001）。异常被
+				 * 静默吞掉后 `rootId` 永远是空串，于是 doCreate/doUpload 里
+				 * `parentId` 为空 → 直接 return →「新建页面/新建文件夹/上传」
+				 * 三个按钮看起来点了没反应。
+				 *
+				 * 改为按优先级兜底，全都只用已经拿到手的 listSpaces 结果：
+				 *   1) 已选中的知识库  2) 列表第一个  3) 才退回去问 describeSpace
+				 */
+				const first = (ps.spaces && ps.spaces[0]) || null;
+				if (first && first.id) {
+					setSpaceId((cur) => cur || first.id);
+					// rootEntryId 可能没随列表返回，此时按 id 补一次 describeSpace。
+					let root = first.rootEntryId;
+					if (!root) {
+						try {
+							const d = await f.describeSpace({ spaceId: first.id });
+							root = d && d.rootEntryId;
+						} catch { /* 单库读取失败就跳过 */ }
+					}
+					if (root) setRootId((cur) => cur || root);
+				}
+				// 个人库单独再试一次（有的部署只有个人库、不在 listSpaces 里）。
 				try {
 					const personal = await f.describeSpace({});
 					if (personal && personal.id) {
@@ -457,7 +524,10 @@ window.__ModuleLoader__.load({
 						setRootId((cur) => cur || personal.rootEntryId);
 					}
 				} catch { /* 个人库不可用时忽略 */ }
-			}, [settings]);
+				/* 依赖必须是稳定值。原来是 `[settings]`，而 settings 是对象：
+				 * 每次 setSettings / 任何重渲染都会生成新引用，effect 于是反复
+				 * 重跑，`guard("加载知识库")` 被反复触发。只看 configured 布尔量即可。 */
+			}, [settings?.configured]);
 
 			react.useEffect(() => {
 				if (!settings?.configured) return;
@@ -488,8 +558,20 @@ window.__ModuleLoader__.load({
 			const onPickEntry = async (entry) => {
 				setPicked(entry);
 				setBody("");
+				/* 文件夹与文件本来就没有可读正文，直接跳过 readEntry。
+				 * 原来对每个节点都发一次读取，点中文件夹时会白等一次远程往返，
+				 * 而这段时间里顶部的「新建/上传」按钮全被 busy 禁着。 */
+				if (entry.type === "folder") {
+					setBody("（文件夹）");
+					await guard("加载子项", () => loadTree(entry.id));
+					return;
+				}
+				if (entry.type === "file") {
+					setBody("（文件，此面板不预览二进制内容）");
+					return;
+				}
 				const r = await guard("读取内容", () => face.readEntry({ entryId: entry.id }));
-				if (r) setBody(r.body || "（此条目没有正文，可能是文件夹或文件）");
+				if (r) setBody(r.body || "（此条目没有正文）");
 			};
 
 			const doSearch = async () => {
@@ -548,10 +630,138 @@ window.__ModuleLoader__.load({
 				say("info", t("notConfigured"));
 			};
 
+			/* 上传前的公共部分：解析父目录 + 读成 base64 + 调 host。 */
+			const resolveParentId = () =>
+				picked && picked.type === "folder" ? picked.id : rootId;
+
+			const readAsBase64 = (file) =>
+				new Promise((resolve, reject) => {
+					const fr = new FileReader();
+					fr.onload = () => {
+						const s = String(fr.result || "");
+						resolve(s.slice(s.indexOf(",") + 1));
+					};
+					fr.onerror = () => reject(new Error("读取本地文件失败"));
+					fr.readAsDataURL(file);
+				});
+
+			const uploadOne = async (file, parentId, mimeOverride) => {
+				const b64 = await readAsBase64(file);
+				return face.uploadFile({
+					parentId,
+					fileName: file.name,
+					contentBase64: b64,
+					mimeType: mimeOverride || file.type || "application/octet-stream"
+				});
+			};
+
+			/* 需要时在指定父目录下创建同名子文件夹，返回它的 entry id。
+			 * 先查一遍已有子项，已存在就复用，避免重复夹。 */
+			const ensureFolder = async (parentId, name, cache) => {
+				const key = `${parentId}/${name}`;
+				if (cache && cache.has(key)) return cache.get(key);
+				let id = "";
+				try {
+					const kids = await face.listChildren({ parentId });
+					const found = ((kids && kids.entries) || []).find(
+						(e) => e.type === "folder" && e.name === name
+					);
+					if (found) id = found.id;
+				} catch { /* 列不出来就直接尝试新建 */ }
+				if (!id) {
+					const r = await face.createEntry({ parentId, name, type: "folder" });
+					if (r) id = r.id;
+				}
+				if (!id) throw new Error(`无法创建子文件夹「${name}」`);
+				if (cache) cache.set(key, id);
+				return id;
+			};
+
+			/* ── 文件夹上传 ────────────────────────────────────────────
+			 * 浏览器的目录选择框（webkitdirectory）给出的 File 带
+			 * webkitRelativePath，形如「我的资料/第一章/1.1.pdf」。按它拆出目录
+			 * 层级，逐级 ensureFolder 建出同样的结构，再把文件放进最内层。
+			 *
+			 * 单文件大小不在这里限制：上传走 file_apply_upload 拿预签名 URL、
+			 * 再用 HTTP PUT 传二进制，不经过 JSON/base64 膨胀，几十上百 MB
+			 * 也能直传；真正的上限由服务端在 apply 时判定。
+			 *
+			 * 逐个串行上传：乐享侧对并发有配额，串行慢但不会触发限流，
+			 * 且进度与失败原因都能如实报出来。
+			 */
+			const doUploadFolder = async (ev) => {
+				const input = ev.target;
+				const files = Array.from(input.files || []);
+				input.value = "";
+				if (!files.length) return;
+
+				const parentId = resolveParentId();
+				if (!parentId) {
+					say("err", spaceId
+						? "当前知识库的根目录未加载：请点「刷新」重试，或重新选择知识库"
+						: "请先在上方选择一个知识库");
+					return;
+				}
+
+				const relOf = (f) => String(f.webkitRelativePath || f.name || "");
+				const partsOf = (f) => relOf(f).split("/").filter(Boolean);
+				const topName = (partsOf(files[0])[0]) || "上传文件夹";
+
+				let rootTarget;
+				try {
+					setBusy("准备目录");
+					rootTarget = await ensureFolder(parentId, topName, new Map());
+				} catch (e) {
+					setBusy("");
+					say("err", `创建「${topName}」失败：${e.message}`);
+					return;
+				}
+				setBusy("");
+
+				const dirCache = new Map();
+				let okCount = 0;
+				let failCount = 0;
+				const failures = [];
+
+				for (let i = 0; i < files.length; i += 1) {
+					const f = files[i];
+					const parts = partsOf(f);
+					const dirs = parts.slice(1, -1);
+					setBusy(`上传 ${i + 1}/${files.length}`);
+					try {
+						let target = rootTarget;
+						for (const d of dirs) target = await ensureFolder(target, d, dirCache);
+						await uploadOne(f, target);
+						okCount += 1;
+					} catch (e) {
+						failCount += 1;
+						failures.push(`${relOf(f)}：${e.message}`);
+					}
+				}
+				setBusy("");
+
+				if (failCount === 0) {
+					say("ok", `文件夹「${topName}」上传完成：${okCount} 个文件 ✓`);
+				} else {
+					const head = failures.slice(0, 3).join("；");
+					say("err",
+						`「${topName}」：成功 ${okCount} 个，失败 ${failCount} 个。` +
+						`前几个失败原因：${head}${failures.length > 3 ? " …" : ""}`);
+				}
+
+				if (picked && picked.type === "folder") await guard("刷新", () => onPickEntry(picked));
+				else await guard("刷新", () => loadTree(rootId));
+			};
+
 			const doCreate = async (type) => {
-				const parentId = picked && picked.type === "folder" ? picked.id : rootId;
-				if (!parentId) { say("err", "请先选择知识库或文件夹"); return; }
-				const name = window.prompt(t("namePrompt"));
+				const parentId = resolveParentId();
+				if (!parentId) {
+					say("err", spaceId
+						? "当前知识库的根目录未加载：请点右侧「刷新」重试，或重新选择知识库"
+						: "请先在上方选择一个知识库");
+					return;
+				}
+				const name = await askName(type === "folder" ? "新建文件夹" : "新建页面", "");
 				if (!name) return;
 				const r = await guard("创建", () => face.createEntry({ parentId, name, type }));
 				if (r) {
@@ -563,7 +773,7 @@ window.__ModuleLoader__.load({
 
 			const doRename = async () => {
 				if (!picked) return;
-				const name = window.prompt(t("namePrompt"), picked.name);
+				const name = await askName("重命名", picked.name);
 				if (!name || name === picked.name) return;
 				const r = await guard("重命名", () => face.renameEntry({ entryId: picked.id, name }));
 				if (r) {
@@ -575,7 +785,8 @@ window.__ModuleLoader__.load({
 
 			const doRemove = async () => {
 				if (!picked) return;
-				if (!window.confirm(t("confirmRemove"))) return;
+				/* window.confirm 在 Electron 里恒为 false，会让「删除」永远直接 return。 */
+				if (!(await askConfirm(t("confirmRemove")))) return;
 				const r = await guard("删除", () => face.removeEntry({ entryId: picked.id }));
 				if (r) {
 					say("ok", `${picked.name} 已删除`);
@@ -589,26 +800,21 @@ window.__ModuleLoader__.load({
 				const file = ev.target.files && ev.target.files[0];
 				ev.target.value = "";
 				if (!file) return;
-				if (file.size > 64 * 1024 * 1024) { say("err", t("tooBig")); return; }
-				const parentId = picked && picked.type === "folder" ? picked.id : rootId;
-				if (!parentId) { say("err", "请先选择知识库或文件夹"); return; }
-				const b64 = await new Promise((resolve, reject) => {
-					const fr = new FileReader();
-					fr.onload = () => {
-						const s = String(fr.result || "");
-						resolve(s.slice(s.indexOf(",") + 1));
-					};
-					fr.onerror = () => reject(new Error("读取本地文件失败"));
-					fr.readAsDataURL(file);
-				});
-				const r = await guard("上传", () =>
-					face.uploadFile({
-						parentId,
-						fileName: file.name,
-						contentBase64: b64,
-						mimeType: file.type || "application/octet-stream"
-					})
-				);
+				/* 不再按大小拦截。
+				 * 上传走 file_apply_upload 拿预签名 URL、再用 HTTP PUT 传二进制，
+				 * 不经过 JSON/base64，本地没有理由设上限；真超了服务端会在 apply
+				 * 阶段返回明确错误。只对超大文件提示一句，不阻断。 */
+				if (file.size > 500 * 1024 * 1024) {
+					say("info", `文件较大（${Math.round(file.size / 1024 / 1024)}MB），上传可能需要一段时间…`);
+				}
+				const parentId = resolveParentId();
+				if (!parentId) {
+					say("err", spaceId
+						? "当前知识库的根目录未加载：请点「刷新」重试，或重新选择知识库"
+						: "请先在上方选择一个知识库");
+					return;
+				}
+				const r = await guard("上传", () => uploadOne(file, parentId));
 				if (r) {
 					say("ok", `${t("uploaded")}：${r.name}`);
 					if (picked && picked.type === "folder") await guard("刷新", () => onPickEntry(picked));
@@ -791,21 +997,51 @@ window.__ModuleLoader__.load({
 												key: "a",
 												className: c.row,
 												children: [
+													/* 三个按钮原来一律 `disabled: busy !== ""`，等于把「能不能新建」
+													 * 绑在「此刻有没有别的远程调用在飞」上：只要初始化阶段任意一个
+													 * 调用不返回，busy 就停住，三个按钮全灰且没有任何提示。
+													 * 改为只跟「有没有可写的父节点」有关。 */
 													jsx("button", {
 														key: "np", type: "button", className: c.btn, "data-size": "sm",
-														disabled: busy !== "", onClick: () => doCreate("page"), children: t("newPage")
+														disabled: !(picked && picked.type === "folder" ? picked.id : rootId),
+														title: rootId ? "新建页面" : "请先选择知识库",
+														onClick: () => doCreate("page"), children: t("newPage")
 													}),
 													jsx("button", {
 														key: "nf", type: "button", className: c.btn, "data-size": "sm",
-														disabled: busy !== "", onClick: () => doCreate("folder"), children: t("newFolder")
+														disabled: !(picked && picked.type === "folder" ? picked.id : rootId),
+														title: rootId ? "新建文件夹" : "请先选择知识库",
+														onClick: () => doCreate("folder"), children: t("newFolder")
 													}),
 													jsx("button", {
 														key: "up", type: "button", className: c.btn, "data-size": "sm",
-														disabled: busy !== "", onClick: () => fileRef.current && fileRef.current.click(),
+														disabled: !(picked && picked.type === "folder" ? picked.id : rootId),
+														title: rootId ? "上传文件到当前位置（不限大小）" : "请先选择知识库",
+														onClick: () => fileRef.current && fileRef.current.click(),
 														children: t("upload")
+													}),
+													/* 文件夹上传：整目录批量上传，保留子目录层级。
+													 * 用 webkitdirectory 让浏览器给出目录选择框，
+													 * 每个 File 上带 webkitRelativePath 提供相对路径。 */
+													jsx("button", {
+														key: "upd", type: "button", className: c.btn, "data-size": "sm",
+														disabled: !(picked && picked.type === "folder" ? picked.id : rootId),
+														title: rootId ? "上传整个文件夹（含子目录，文件大小不限）" : "请先选择知识库",
+														onClick: () => folderRef.current && folderRef.current.click(),
+														children: "上传文件夹"
 													}),
 													jsx("input", {
 														key: "fi", ref: fileRef, type: "file", style: { display: "none" }, onChange: doUpload
+													}),
+													jsx("input", {
+														key: "fdi",
+														ref: folderRef,
+														type: "file",
+														style: { display: "none" },
+														webkitdirectory: "",
+														directory: "",
+														multiple: true,
+														onChange: doUploadFolder
 													})
 												]
 											})
@@ -829,7 +1065,7 @@ window.__ModuleLoader__.load({
 											}),
 											jsx("button", {
 												key: "r", type: "button", className: c.btn, "data-size": "sm",
-												disabled: busy !== "" || !rootId, onClick: () => guard("刷新", () => loadTree(rootId)),
+												disabled: !rootId, onClick: () => guard("刷新", () => loadTree(rootId)),
 												children: t("refresh")
 											})
 										]
@@ -998,6 +1234,57 @@ window.__ModuleLoader__.load({
 													]
 												})
 								]
+							})
+						: null,
+
+					// ── 输入/确认浮层（替代被 Electron 禁用的 prompt / confirm）──
+					ask
+						? jsx("div", {
+								key: "ask",
+								style: {
+									position: "fixed", inset: "0", zIndex: 9999,
+									background: "rgba(0,0,0,.45)",
+									display: "flex", alignItems: "center", justifyContent: "center"
+								},
+								onClick: (e) => { if (e.target === e.currentTarget) settleAsk(null); },
+								children: jsx("div", {
+									style: {
+										background: "var(--dsw-alias-bg-base, #fff)", color: "inherit",
+										borderRadius: "10px", padding: "16px", minWidth: "300px",
+										boxShadow: "0 8px 32px rgba(0,0,0,.3)"
+									},
+									children: [
+										jsx("p", { key: "t", style: { margin: "0 0 10px", fontWeight: "600" }, children: ask.title }),
+										ask.kind === "prompt"
+											? jsx("input", {
+													key: "i",
+													autoFocus: true,
+													style: { width: "100%", padding: "6px 8px", boxSizing: "border-box" },
+													value: ask.value,
+													onChange: (e) => setAsk((a) => (a ? { ...a, value: e.target.value } : a)),
+													onKeyDown: (e) => {
+														if (e.key === "Enter") settleAsk(ask.value.trim() || null);
+														if (e.key === "Escape") settleAsk(null);
+													}
+												})
+											: null,
+										jsx("div", {
+											key: "b",
+											style: { display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "14px" },
+											children: [
+												jsx("button", {
+													key: "c", type: "button", className: c.btn, "data-size": "sm",
+													onClick: () => settleAsk(null), children: "取消"
+												}),
+												jsx("button", {
+													key: "o", type: "button", className: c.btn, "data-size": "sm", "data-kind": "primary",
+													onClick: () => settleAsk(ask.kind === "prompt" ? (ask.value.trim() || null) : true),
+													children: "确定"
+												})
+											]
+										})
+									]
+								})
 							})
 						: null
 				]
