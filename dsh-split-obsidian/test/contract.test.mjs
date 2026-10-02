@@ -32,7 +32,12 @@ const cm = methodsOf(clientSrc, "descriptors: [");
 const hm = methodsOf(hostSrc, "invocations: [");
 check("client 找到 " + cm.length + " 个方法", cm.length > 0);
 check("host 找到 " + hm.length + " 个方法", hm.length > 0);
-check("方法集完全一致", JSON.stringify(cm) === JSON.stringify(hm), "client=" + cm.join(",") + " host=" + hm.join(","));
+/*
+ * 按**集合**比，不按顺序 —— 两边各自排行的顺序不一样（host 把无参方法排前面），
+ * 顺序不影响调用，断言顺序只会制造假失败。
+ */
+const sameSet = cm.length === hm.length && cm.every((m) => hm.includes(m));
+check("方法集完全一致（顺序无关）", sameSet, "client=" + cm.join(",") + " host=" + hm.join(","));
 
 console.log("\n=== 参数形状（踩过的坑）===");
 /**
@@ -46,6 +51,26 @@ check("host 没有裸 codec 参数", !bare.test(stripComments(hostSrc)), "同上
 const shape = /name:\s*"args",\s*wire:\s*"args",\s*source:\s*"json"/;
 check("client 用 { name, wire, source, codec } 对象", shape.test(clientSrc));
 check("host 用 { name, wire, source, codec } 对象", shape.test(hostSrc));
+
+console.log("\n=== 无参方法不声明参数（踩过的坑）===");
+/*
+ * status / unsnap 不需要参数。给它们也挂上 args 会让边界校验对不上：
+ *   gateway/input-invalid: wire field "args" failed boundary validation
+ * 所以这两个方法在两边都必须是 parameters: []。
+ */
+const NO_ARG_METHODS = ["status", "unsnap"];
+/*
+ * 两边的描述符都写成**一行**（单行对象），所以不能跨花括号匹配 ——
+ * [^}]* 会在第一个 } 处停住。直接找"包含该 method 的那一行"再判断。
+ */
+const hasEmptyParams = (src, method) => {
+  const line = src.split("\n").find((l) => l.includes('method: "' + method + '"'));
+  return line !== undefined && /parameters: \[\]/.test(line);
+};
+for (const m of NO_ARG_METHODS) {
+  check("client " + m + " 不声明参数", hasEmptyParams(clientSrc, m));
+  check("host " + m + " 不声明参数", hasEmptyParams(hostSrc, m));
+}
 
 console.log("\n=== codec 工厂 ===");
 check("client codec 带 create() 工厂", /create:\s*\(\)\s*=>/.test(clientSrc));

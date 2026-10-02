@@ -83,6 +83,14 @@ const statusSchema = z.object({
   snapped: z.boolean()
 });
 
+
+const uriSchema = z.object({ ok: z.boolean(), uri: z.string() });
+
+/** codec 必须声明在 MANIFEST 之前（MANIFEST 在模块求值期就会调用它，否则踩 TDZ）。 */
+const codec = (typeSymbol, schema) => ({ mode: "strict", typeSymbol, create: () => schema });
+
+
+/** snap / drag / focus / openVault 的结果：一次并排的落地矩形。 */
 const actionSchema = z.object({
   ok: z.boolean(),
   ratio: z.number(),
@@ -91,29 +99,57 @@ const actionSchema = z.object({
   right: rectSchema
 });
 
-const uriSchema = z.object({ ok: z.boolean(), uri: z.string() });
+/** unsnap 的结果：DSH 占满工作区。 */
+const unsnapSchema = z.object({
+  ok: z.boolean(),
+  ratio: z.number(),
+  label: z.string(),
+  left: rectSchema,
+  right: rectSchema
+});
 
-/** codec 必须声明在 MANIFEST 之前（MANIFEST 在模块求值期就会调用它，否则踩 TDZ）。 */
-const codec = (typeSymbol, schema) => ({ mode: "strict", typeSymbol, create: () => schema });
+/** focus 的结果。 */
+const focusSchema = z.object({
+  ok: z.boolean(),
+  ratio: z.number(),
+  label: z.string(),
+  left: rectSchema,
+  right: rectSchema
+});
+
+/** openVault 的结果。 */
+const openVaultSchema = z.object({ ok: z.boolean(), uri: z.string() });
 
 const P = "dsh-split-obsidian";
 /*
  * 远程描述符。参数形状必须与 client 半**逐字一致** —— 两边对不上会在
  * 挂载时报签名不匹配。这里同样沿用「单 JSON args 参数」的形状。
  */
-const argCodec = (method) => ({ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#" + method + "Args") });
+/*
+ * 参数 schema。
+ *
+ * 必须用 **z.looseObject({})** 而不是 z.object({}) —— 后者会把未知键全部剥掉，
+ * 于是 host 收到的是空对象（dsh-lexiang 踩过同一个坑，它的注释里记着：
+ * "z.object({}) strips every unknown key"）。这里要的是宽松透传，
+ * 具体字段由各方法自己校验。
+ *
+ * 无参方法（status / unsnap）**不声明任何参数** —— 之前给它们也挂上 args，
+ * 结果是 client 传 {}、边界校验对不上，报
+ * "wire field \"args\" failed boundary validation"。
+ */
+const looseArgs = () => codec(P + "#Args", z.looseObject({}));
 
 const MANIFEST = {
   package: P,
   face: "host",
   schemas: [],
   invocations: [
-    { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [argCodec("status")], result: codec(P + "#statusResult") },
-    { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [argCodec("snap")], result: codec(P + "#snapResult") },
-    { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [argCodec("drag")], result: codec(P + "#dragResult") },
-    { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [argCodec("unsnap")], result: codec(P + "#unsnapResult") },
-    { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [argCodec("focus")], result: codec(P + "#focusResult") },
-    { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [argCodec("openVault")], result: codec(P + "#openVaultResult") }
+    { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#statusResult", statusSchema) },
+    { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#unsnapResult", unsnapSchema) },
+    { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: looseArgs() }], result: codec(P + "#snapResult", actionSchema) },
+    { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: looseArgs() }], result: codec(P + "#dragResult", actionSchema) },
+    { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: looseArgs() }], result: codec(P + "#focusResult", focusSchema) },
+    { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: looseArgs() }], result: codec(P + "#openVaultResult", openVaultSchema) }
   ],
   model: { services: [], events: [], objects: [] }
 };

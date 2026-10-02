@@ -152,15 +152,25 @@ window.__ModuleLoader__.load({
      * 这里沿用 dsh-lexiang 的做法：每个方法都收一个叫 args 的 JSON 参数，
      * 无参方法靠 acceptsUndefined 也能不传。这样描述符形状统一，少一类错误。
      */
+    /*
+     * 远程描述符。三点必须与 host 半逐字一致：
+     *
+     *  1. parameters 的每一项必须是**对象** { name, wire, source, codec } ——
+     *     写裸 codec 会让 api-gateway 读到 undefined 再读 .mode，报
+     *     "Cannot read properties of undefined (reading 'mode')"。
+     *  2. **无参方法不声明参数**。status / unsnap 之前也挂了 args，
+     *     结果边界校验对不上，报 "wire field \"args\" failed boundary validation"。
+     *  3. result codec 必须带 create() 工厂。
+     */
     const CONTRIBUTION = {
       package: P,
       descriptors: [
-        { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#statusArgs") }], result: codec(P + "#statusResult") },
-        { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#snapArgs") }], result: codec(P + "#snapResult") },
-        { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#dragArgs") }], result: codec(P + "#dragResult") },
-        { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#unsnapArgs") }], result: codec(P + "#unsnapResult") },
-        { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#focusArgs") }], result: codec(P + "#focusResult") },
-        { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#openVaultArgs") }], result: codec(P + "#openVaultResult") }
+                { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#statusResult") },
+                { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#snapArgs") }], result: codec(P + "#snapResult") },
+                { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#dragArgs") }], result: codec(P + "#dragResult") },
+                { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#unsnapResult") },
+                { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#focusArgs") }], result: codec(P + "#focusResult") },
+                { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#openVaultArgs") }], result: codec(P + "#openVaultResult") }
       ]
     };
 
@@ -439,11 +449,15 @@ window.__ModuleLoader__.load({
        * 所有远程方法都收一个叫 args 的 JSON 参数（见 CONTRIBUTION 的注释）。
        * 无参方法也要传一个对象 —— 传 undefined 会让参数 codec 拿到空值。
        */
+      /*
+       * 有参方法传 { ... }，无参方法**什么都不传**。
+       * 给无参方法传 {} 会和描述符的 parameters: [] 对不上，边界校验会拒。
+       */
       const callRemote = async (method, args) => {
         await mount;
         const remote = ctx.get("remote.obsidianSplit");
         if (remote === undefined) throw new Error("obsidianSplit 服务不可用（host 半可能未加载）");
-        const result = await remote[method](args === undefined ? {} : args);
+        const result = args === undefined ? await remote[method]() : await remote[method](args);
         if (!result.ok) throw new Error(result.error.code + ": " + result.error.message);
         return result.value;
       };
