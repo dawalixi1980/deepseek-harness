@@ -6,7 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIB = join(HERE, "..", "lib");
@@ -73,6 +73,34 @@ for (const dep of inject) {
   check("inject 允许 " + dep, ALLOWED_INJECT.includes(dep), "不在白名单里，profile 可能解析不到 -> 插件静默不加载");
 }
 check("inject 声明了 runtime", inject.includes("@deepseek-ai/dsh-client-runtime"));
+
+console.log("\n=== host 模块能否真正 import ===");
+/*
+ * 踩过的坑：我用脚本生成 host 的 MANIFEST 时，把生成脚本里的临时函数
+ * name(m) 写进了产物，于是 host 端在模块求值期就抛 ReferenceError。
+ *
+ * 后果特别隐蔽：host 挂掉 -> 整个插件不加载 -> 引导页没有条目、标签页不出现，
+ * 而**界面上一个字都不报**。所以这里直接真的 import 一次。
+ *
+ * 注意：这一步要求依赖可解析（zod / typert-protocol），所以在源码目录跑会失败、
+ * 在 profile 的 node_modules 里跑才通过。解析不到就跳过，避免误报。
+ */
+{
+  let hostLoaded = "skip";
+  let detail = "";
+  try {
+    const mod = await import(pathToFileURL(join(LIB, "index.js")).href);
+    hostLoaded = typeof mod.apply === "function" && Array.isArray(mod.inject) ? "ok" : "bad";
+    detail = "name=" + mod.name + " inject=" + JSON.stringify(mod.inject);
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    // 依赖解析不到（源码目录）不算失败
+    if (/Cannot find package '(zod|@deepseek-ai)/.test(message)) hostLoaded = "skip";
+    else { hostLoaded = "fail"; detail = message; }
+  }
+  if (hostLoaded === "skip") console.log("  SKIP  host 模块 import（依赖不可解析，通常是在源码目录跑）");
+  else check("host 模块可以 import 且导出 apply/inject", hostLoaded === "ok", detail);
+}
 
 console.log("\n=== host 方法签名收 args ===");
 for (const m of hm) {

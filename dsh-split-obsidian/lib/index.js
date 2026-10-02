@@ -108,12 +108,12 @@ const MANIFEST = {
   face: "host",
   schemas: [],
   invocations: [
-    { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [argCodec("status")], result: codec(P + "#" + name(m) + "Result") },
-    { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [argCodec("snap")], result: codec(P + "#" + name(m) + "Result") },
-    { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [argCodec("drag")], result: codec(P + "#" + name(m) + "Result") },
-    { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [argCodec("unsnap")], result: codec(P + "#" + name(m) + "Result") },
-    { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [argCodec("focus")], result: codec(P + "#" + name(m) + "Result") },
-    { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [argCodec("openVault")], result: codec(P + "#" + name(m) + "Result") }
+    { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [argCodec("status")], result: codec(P + "#statusResult") },
+    { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [argCodec("snap")], result: codec(P + "#snapResult") },
+    { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [argCodec("drag")], result: codec(P + "#dragResult") },
+    { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [argCodec("unsnap")], result: codec(P + "#unsnapResult") },
+    { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [argCodec("focus")], result: codec(P + "#focusResult") },
+    { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [argCodec("openVault")], result: codec(P + "#openVaultResult") }
   ],
   model: { services: [], events: [], objects: [] }
 };
