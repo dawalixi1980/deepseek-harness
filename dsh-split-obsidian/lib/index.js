@@ -97,17 +97,23 @@ const uriSchema = z.object({ ok: z.boolean(), uri: z.string() });
 const codec = (typeSymbol, schema) => ({ mode: "strict", typeSymbol, create: () => schema });
 
 const P = "dsh-split-obsidian";
+/*
+ * 远程描述符。参数形状必须与 client 半**逐字一致** —— 两边对不上会在
+ * 挂载时报签名不匹配。这里同样沿用「单 JSON args 参数」的形状。
+ */
+const argCodec = (method) => ({ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#" + method + "Args") });
+
 const MANIFEST = {
   package: P,
   face: "host",
   schemas: [],
   invocations: [
-    { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#SplitStatus", statusSchema) },
-    { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [codec(P + "#Ratio", z.number())], result: codec(P + "#SplitAction", actionSchema) },
-    { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [codec(P + "#Ratio", z.number())], result: codec(P + "#SplitAction", actionSchema) },
-    { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#SplitAction", actionSchema) },
-    { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [codec(P + "#Side", z.string())], result: codec(P + "#SplitAction", actionSchema) },
-    { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [codec(P + "#VaultName", z.string())], result: codec(P + "#OpenUri", uriSchema) }
+    { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [argCodec("status")], result: codec(P + "#" + name(m) + "Result") },
+    { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [argCodec("snap")], result: codec(P + "#" + name(m) + "Result") },
+    { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [argCodec("drag")], result: codec(P + "#" + name(m) + "Result") },
+    { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [argCodec("unsnap")], result: codec(P + "#" + name(m) + "Result") },
+    { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [argCodec("focus")], result: codec(P + "#" + name(m) + "Result") },
+    { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [argCodec("openVault")], result: codec(P + "#" + name(m) + "Result") }
   ],
   model: { services: [], events: [], objects: [] }
 };
@@ -135,7 +141,7 @@ class ObsidianSplitGateway extends TypertRemoteService {
   }
 
   /** 现在能不能用。任何异常都转成人话，别让界面看到堆栈。 */
-  async status() {
+  async status(_args) {
     const blank = { available: false, reason: "", dshHandle: 0, obHandle: 0, workArea: { x: 0, y: 0, width: 0, height: 0 }, ratio: lastRatio, gap: DEFAULT_GAP, presets: PRESETS, snapped: false };
     try {
       const srv = await ensureServer();
@@ -176,8 +182,9 @@ class ObsidianSplitGateway extends TypertRemoteService {
   }
 
   /** 按比例并排。 */
-  async snap(ratio) {
-    return await this.arrange(ratio);
+  /** 按比例并排。args = { ratio } */
+  async snap(args) {
+    return await this.arrange(args && typeof args.ratio === "number" ? args.ratio : lastRatio);
   }
 
   /**
@@ -186,9 +193,9 @@ class ObsidianSplitGateway extends TypertRemoteService {
    * 和 snap 的区别：不重抓句柄、不做额外检查，只发一条 both 命令。
    * 实测单次约 5ms，所以可以跟着鼠标每一帧调。
    */
-  async drag(ratio) {
+  async drag(args) {
     const srv = await this.ready();
-    const r = clampRatio(ratio);
+    const r = clampRatio(args && typeof args.ratio === "number" ? args.ratio : lastRatio);
     lastRatio = r;
     const pair = computeSideBySide(srv.workArea, r, DEFAULT_GAP);
     await placeBoth(pair.left, pair.right);
@@ -196,7 +203,7 @@ class ObsidianSplitGateway extends TypertRemoteService {
   }
 
   /** 还原：DSH 占满工作区。 */
-  async unsnap() {
+  async unsnap(_args) {
     const srv = await this.ready();
     const full = computeFull(srv.workArea);
     await placeLeft(full);
@@ -204,16 +211,17 @@ class ObsidianSplitGateway extends TypertRemoteService {
   }
 
   /** 把焦点给某一侧。 */
-  async focus(side) {
+  async focus(args) {
     const srv = await this.ready();
-    await focusSide(side === "right" ? "right" : "left");
+    const side = args && args.side === "right" ? "right" : "left";
+    await focusSide(side);
     const pair = computeSideBySide(srv.workArea, lastRatio, DEFAULT_GAP);
     return { ok: true, ratio: lastRatio, label: describeRatio(lastRatio), left: pair.left, right: pair.right };
   }
 
   /** 用 obsidian:// 让 Obsidian 定位到某个库。 */
-  async openVault(vaultName) {
-    const raw = typeof vaultName === "string" ? vaultName.trim() : "";
+  async openVault(args) {
+    const raw = args && typeof args.vaultName === "string" ? args.vaultName.trim() : "";
     if (raw.length === 0) throw new Error("库名为空");
     const uri = "obsidian://open?vault=" + encodeURIComponent(raw);
     const ok = await openObsidianUri(uri);

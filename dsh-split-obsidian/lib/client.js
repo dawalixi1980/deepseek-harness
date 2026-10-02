@@ -141,15 +141,26 @@ window.__ModuleLoader__.load({
     }
 
     const P = "dsh-split-obsidian";
+    /*
+     * 远程描述符。
+     *
+     * 参数的形状必须是一个**对象**：{ name, wire, source, codec }。
+     * 写成裸 codec(`parameters: [codec(...)]`) 会在 mount 时炸：
+     * api-gateway 的 requireStrictInputs 会逐个读 parameter.codec，
+     * 拿到 undefined 就报 "Cannot read properties of undefined (reading 'mode')"。
+     *
+     * 这里沿用 dsh-lexiang 的做法：每个方法都收一个叫 args 的 JSON 参数，
+     * 无参方法靠 acceptsUndefined 也能不传。这样描述符形状统一，少一类错误。
+     */
     const CONTRIBUTION = {
       package: P,
       descriptors: [
-        { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#SplitStatus") },
-        { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [codec(P + "#Ratio")], result: codec(P + "#SplitAction") },
-        { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [codec(P + "#Ratio")], result: codec(P + "#SplitAction") },
-        { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [], result: codec(P + "#SplitAction") },
-        { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [codec(P + "#Side")], result: codec(P + "#SplitAction") },
-        { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [codec(P + "#VaultName")], result: codec(P + "#OpenUri") }
+        { id: P + "#obsidianSplit/status", service: "obsidianSplit", namespace: "obsidianSplit", method: "status", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#statusArgs") }], result: codec(P + "#statusResult") },
+        { id: P + "#obsidianSplit/snap", service: "obsidianSplit", namespace: "obsidianSplit", method: "snap", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#snapArgs") }], result: codec(P + "#snapResult") },
+        { id: P + "#obsidianSplit/drag", service: "obsidianSplit", namespace: "obsidianSplit", method: "drag", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#dragArgs") }], result: codec(P + "#dragResult") },
+        { id: P + "#obsidianSplit/unsnap", service: "obsidianSplit", namespace: "obsidianSplit", method: "unsnap", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#unsnapArgs") }], result: codec(P + "#unsnapResult") },
+        { id: P + "#obsidianSplit/focus", service: "obsidianSplit", namespace: "obsidianSplit", method: "focus", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#focusArgs") }], result: codec(P + "#focusResult") },
+        { id: P + "#obsidianSplit/openVault", service: "obsidianSplit", namespace: "obsidianSplit", method: "openVault", invocation: { kind: "direct" }, parameters: [{ name: "args", wire: "args", source: "json", acceptsUndefined: true, codec: codec(P + "#openVaultArgs") }], result: codec(P + "#openVaultResult") }
       ]
     };
 
@@ -424,21 +435,25 @@ window.__ModuleLoader__.load({
       const t = ctx.locale.bind(NS);
 
       const mount = ctx.remote.$mount(CONTRIBUTION);
-      const callRemote = async (method, arg) => {
+      /*
+       * 所有远程方法都收一个叫 args 的 JSON 参数（见 CONTRIBUTION 的注释）。
+       * 无参方法也要传一个对象 —— 传 undefined 会让参数 codec 拿到空值。
+       */
+      const callRemote = async (method, args) => {
         await mount;
         const remote = ctx.get("remote.obsidianSplit");
         if (remote === undefined) throw new Error("obsidianSplit 服务不可用（host 半可能未加载）");
-        const result = arg === undefined ? await remote[method]() : await remote[method](arg);
+        const result = await remote[method](args === undefined ? {} : args);
         if (!result.ok) throw new Error(result.error.code + ": " + result.error.message);
         return result.value;
       };
       const face = () => ({
         status: () => callRemote("status"),
-        snap: (r) => callRemote("snap", r),
-        drag: (r) => callRemote("drag", r),
+        snap: (ratio) => callRemote("snap", { ratio: ratio }),
+        drag: (ratio) => callRemote("drag", { ratio: ratio }),
         unsnap: () => callRemote("unsnap"),
-        focus: (s) => callRemote("focus", s),
-        openVault: (n) => callRemote("openVault", n)
+        focus: (side) => callRemote("focus", { side: side }),
+        openVault: (vaultName) => callRemote("openVault", { vaultName: vaultName })
       });
 
       // ① 声明标签页类型 + 引导页条目（就出现在「工作区文件 / 浏览器 / 书签」那个列表里）
