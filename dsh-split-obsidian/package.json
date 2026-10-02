@@ -23,7 +23,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/layout.test.mjs"
+    "test": "node test/layout.test.mjs && node test/contract.test.mjs",
+    "check:render": "node scripts/render-check.mjs"
   },
   "keywords": [
     "dsh",

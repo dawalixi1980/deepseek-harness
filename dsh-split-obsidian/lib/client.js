@@ -195,6 +195,13 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = react.useState(null);
       const [dragging, setDragging] = react.useState(false);
       const [fatal, setFatal] = react.useState("");
+      /*
+       * 工作区路径（当前会话的 cwd）。必须在**任何使用之前**定义 ——
+       * 之前它被放在组件体末尾，而 doOpenVault 之类的闭包在前面就引用了它，
+       * 渲染时触发 TDZ（Cannot access before initialization），
+       * 结果是整个面板**静默渲染不出来**。
+       */
+      const workspacePath = String(props.workspacePath || props.cwd || "");
       const trackRef = react.useRef(null);
       const aliveRef = react.useRef(true);
       const dragRef = react.useRef({ active: false, raf: 0, pending: -1 });
@@ -325,9 +332,6 @@ window.__ModuleLoader__.load({
         d.pending = -1;
         Promise.resolve(face.snap(finalRatio)).catch(() => { /* 忽略 */ });
       };
-
-      // 工作区路径：从 props 拿（DSH 会把当前会话的 cwd 传下来），拿不到就留空
-      const workspacePath = String(props.workspacePath || props.cwd || "");
 
       if (fatal) {
         return jsx("div", { className: "OS_root", children: jsx("p", { className: "OS_msg", "data-kind": "err", children: fatal }) });
