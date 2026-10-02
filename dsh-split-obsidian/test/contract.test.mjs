@@ -53,6 +53,27 @@ check("host codec 带 create() 工厂", /create:\s*\(\)\s*=>/.test(hostSrc));
 check("client codec.mode 为 strict", /mode:\s*"strict"/.test(clientSrc));
 check("host codec.mode 为 strict", /mode:\s*"strict"/.test(hostSrc));
 
+console.log("\n=== dsh.client.inject 白名单 ===");
+/*
+ * 踩过的坑：我一度把 "@deepseek-ai/dsh-client-ui-sidebar" 写进 inject，
+ * 以为"要用侧栏就得声明它"。但那个包只在 app.asar 与 profiles/node_modules 里，
+ * profile 的 node_modules 解析不到 —— boot 图找不到这个依赖，插件静默加载失败，
+ * 表现为"引导页里没有条目、标签页也不出现"，而**没有任何报错信息**。
+ *
+ * 已装的 5 个能跑的插件，inject 全都是下面这三个。所以锁死白名单。
+ */
+const ALLOWED_INJECT = [
+  "@deepseek-ai/dsh-client-runtime",
+  "@deepseek-ai/dsh-client-locale",
+  "@deepseek-ai/dsh-api-gateway"
+];
+const pkg = JSON.parse(readFileSync(join(LIB, "..", "package.json"), "utf8"));
+const inject = pkg.dsh?.client?.inject ?? [];
+for (const dep of inject) {
+  check("inject 允许 " + dep, ALLOWED_INJECT.includes(dep), "不在白名单里，profile 可能解析不到 -> 插件静默不加载");
+}
+check("inject 声明了 runtime", inject.includes("@deepseek-ai/dsh-client-runtime"));
+
 console.log("\n=== host 方法签名收 args ===");
 for (const m of hm) {
   check("host " + m + " 签名存在", new RegExp("async " + m + "\\(").test(hostSrc));

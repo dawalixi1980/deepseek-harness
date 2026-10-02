@@ -41,8 +41,7 @@
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-api-gateway",
-        "@deepseek-ai/dsh-client-ui-sidebar"
+        "@deepseek-ai/dsh-api-gateway"
       ]
     },
     "bundle": {
