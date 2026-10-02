@@ -1,0 +1,5 @@
+# Bundle layer contributed by dsh-split-obsidian.
+# Installed automatically when a profile lists this bundle.
+- insert:
+    - id: obsidian-split
+      name: dsh-split-obsidian
