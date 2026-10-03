@@ -16,11 +16,6 @@
 | `[lexiang/](lexiang/)` | 腾讯乐享官方 MCP 技能包（@lexiang/skills v1.1.2，MIT），6 个 skill：配置向导 / 搜索阅读 / 文档写入 / Block 编辑 / 文件上传 / 外部数据源导入。 |
 | [`.agents/skills/harnessmaker/`](.agents/skills/harnessmaker/SKILL.md) | 插件开发 skill：完整开发/分发/安装/验证框架，含实测踩坑（tarball vs git/link 安装、Web 白名单 `settings-not-exposed`、运行时验证清单）。 |
 
-## 相关仓库
-
-| 仓库 | 说明 |
-|---|---|
-| [dsh-ogodingyue](https://github.com/dawalixi1980/dsh-ogodingyue) | **OpenCode Go 用量常驻条**（黑白配色版）：输入框下方常驻显示套餐余量（滚动/周/月）、token 消耗与花费。fork 自 `OK-wx/dsh-ocgo-lite`，只改配色 —— 去掉全部品牌色改为纯灰阶、不跟主题、去掉字重与光晕。**独立仓库，不在本仓库内。** |
 
 ## 关于这些插件
 
