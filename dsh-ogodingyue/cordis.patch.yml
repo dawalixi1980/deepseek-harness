@@ -1,0 +1,5 @@
+# dsh-ogodingyue bundle layer
+- insert:
+    - id: ocgo-lite
+      name: dsh-ogodingyue
+      inject: ['webServer']

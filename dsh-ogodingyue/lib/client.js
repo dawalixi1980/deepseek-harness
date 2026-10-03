@@ -1,0 +1,734 @@
+// dsh-ogodingyue — Client half
+// 聊天输入框下方常驻用量条(composer.dock):GO 徽标 + 三个配额圆环 + token + 金额,
+// 每个区块点击弹出各自炫酷详情卡片(Portal 到 body,全部内联样式,不依赖 CSS 注入)。
+window.__ModuleLoader__.load({
+  id: "dsh-ogodingyue",
+  factory: (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
+    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+    const React = require("react");
+    const ReactDOM = require("react-dom");
+
+    const inject = ["slots"];
+    const API = "/ocgo-lite/api";
+
+    // 少量增强样式(仅 hover;核心布局与卡片样式全部内联,不依赖注入成功)
+    const CSS = `
+.ocgo-lite .seg:hover { background: rgba(128,128,128,.12); }
+.ocgo-lite-detail .btn { border: none; background: transparent; color: #000; border-radius: 0; padding: 3px 6px; font-size: 11px; cursor: pointer; font-family: inherit;  }
+/* hover：只加一点灰底，不加下划线 */
+.ocgo-lite-detail .btn:hover { background: rgba(128,128,128,.15); }
+.ocgo-lite-detail .btn:active { background: rgba(128,128,128,.28); }
+`;
+
+    function fmtInt(n) {
+      n = Number(n);
+      if (isNaN(n)) return "-";
+      // 完整数字 + 千分位(如 604,500,000),不缩写
+      return Math.round(n).toLocaleString("en-US");
+    }
+    // 紧凑缩写(模型明细行用):356,380 → 0.4M / 35,319 → 35.3K,一行塞下
+    function fmtCompact(n) {
+      n = Number(n);
+      if (isNaN(n)) return "-";
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+      return String(Math.round(n));
+    }
+    function fmtUsd(v) {
+      v = Number(v);
+      return isNaN(v) ? "-" : "$" + v.toFixed(2);
+    }
+    function fmtReset(iso) {
+      if (!iso) return "未知";
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      const diff = d.getTime() - Date.now();
+      if (diff <= 0) return "已重置";
+      const day = Math.floor(diff / 86400e3);
+      const h = Math.floor((diff % 86400e3) / 3600e3);
+      const m = Math.floor((diff % 3600e3) / 60e3);
+      if (day > 0) return day + " 天 " + h + " 小时";
+      if (h > 0) return h + " 小时 " + m + " 分";
+      return m + " 分钟";
+    }
+    function pctOf(w) { return w && typeof w.percent === "number" ? w.percent : null; }
+    /* 纯灰阶三档：>=90 纯黑、>=70 深灰、其余中灰。不再用色相区分。 */
+    function ringColor(p) { return p == null ? "#999999" : p >= 90 ? "#000000" : p >= 70 ? "#555555" : "#999999"; }
+    function fmtClock(ts) {
+      if (!ts) return "-";
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return "-";
+      const p = (x) => String(x).padStart(2, "0");
+      return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+    }
+    // 日期时间(用于定价更新等跨天时间):MM-DD HH:MM
+    function fmtDT(iso) {
+      if (!iso) return "-";
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      const p = (x) => String(x).padStart(2, "0");
+      return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+    }
+
+    // SVG 圆环:外圈底色 + 内圈进度,中心数字用 HTML 叠加(保证显示,不依赖 SVG text 渲染)
+    function Ring(props) {
+      const { percent, color } = props;
+      const p = percent == null ? 0 : Math.max(0, Math.min(100, percent));
+      const R = 9, C = 2 * Math.PI * R;
+      const filled = (p / 100) * C;
+      const label = percent == null ? "-" : Math.round(percent) + "%";
+      return React.createElement("span", {
+        style: { position: "relative", display: "inline-block", width: 26, height: 26, flex: "none" },
+      },
+        React.createElement("svg", { width: 26, height: 26, viewBox: "0 0 26 26" },
+          React.createElement("circle", { cx: 13, cy: 13, r: R, fill: "none", stroke: "rgba(128,128,128,.22)", strokeWidth: 2 }),
+          React.createElement("circle", {
+            cx: 13, cy: 13, r: R, fill: "none",
+            stroke: color, strokeWidth: 2,
+            strokeDasharray: C + " " + C,
+            strokeDashoffset: C - filled,
+            transform: "rotate(-90 13 13)",
+          })),
+        React.createElement("span", {
+          style: {
+            position: "absolute", inset: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            /*
+             * 圆环内的百分比文字统一用纯黑 —— 8px 的小字如果跟着圆环灰度走，
+             * 中灰档（#999）几乎看不清。灰度层次由圆环本身表达就够了。
+             */
+            fontSize: 8, fontWeight: 400, color: "#000000",
+            fontVariantNumeric: "tabular-nums",
+            lineHeight: 1, pointerEvents: "none",
+          },
+        }, label));
+    }
+
+    // 模块级共享缓存:跨会话实例共享数据,切换会话时立即显示旧数据再后台刷新(避免白屏等待)
+    let sharedData = null;
+    let sharedAt = 0;
+
+    // 模块级会话配置记忆:每个会话独立记住「范围 + 模型」选择;
+    // 切走再切回时恢复该会话自己的配置,互不影响(跨组件实例存活)
+    const sessionPrefs = new Map();
+
+    function OcgoLite(props) {
+      // 当前会话 ID(来自 composer.dock 槽位 props;用于"本次会话"切换与配置记忆)
+      const sessionId = (props && props.sessionId) || null;
+      const [data, setData] = React.useState(sharedData);
+      const [loading, setLoading] = React.useState(!sharedData);
+      // 当前展开详情的区块:null=收起;pop={key, rect}
+      const [pop, setPop] = React.useState(null);
+      // 弹出动画态:挂载后下一帧切 true,触发 opacity/transform 过渡
+      const [show, setShow] = React.useState(false);
+      // 最后成功更新时间戳
+      const [lastUpdated, setLastUpdated] = React.useState(sharedAt || null);
+      // 是否已加载过:首次加载显示 loading,后续刷新无感(不闪 loading)
+      const loadedRef = React.useRef(!!sharedData);
+      // 状态条容器 ref + 卡片 ref:用于"点击外部关闭"
+      const wrapRef = React.useRef(null);
+      // 复制 API Key 的反馈状态(必须在组件顶层,不能在条件分支里)
+      const [copied, setCopied] = React.useState(false);
+      // 弹窗提示(复制成功等)
+      const [toast, setToast] = React.useState(null);
+      // 上次识别到的 provider(检测切换,变化时 toast 提示)
+      const prevProviderRef = React.useRef(null);
+      // 选中的模型:null=全部;选中后状态条 token/花费联动显示该模型
+      // 统计范围:'all'=全部会话 / 'session'=本次会话
+      // 两者初值取自该会话的记忆配置(无记忆则默认 全部/全部)
+      const savedPrefs = sessionId ? sessionPrefs.get(sessionId) : null;
+      const [modelSel, setModelSel] = React.useState(savedPrefs ? savedPrefs.model : null);
+      const [scope, setScope] = React.useState(savedPrefs ? savedPrefs.scope : 'all');
+      // 切会话(组件复用或重挂):恢复该会话记忆的配置
+      React.useEffect(() => {
+        if (!sessionId) return;
+        const p = sessionPrefs.get(sessionId);
+        if (p) {
+          setScope(p.scope);
+          setModelSel(p.model);
+        }
+      }, [sessionId]);
+      // 配置变更:写回该会话的记忆(切走再切回仍保留)
+      React.useEffect(() => {
+        if (!sessionId) return;
+        sessionPrefs.set(sessionId, { scope, model: modelSel });
+      }, [sessionId, scope, modelSel]);
+
+      // 复制文本到剪贴板:clipboard API 优先,失败回退 execCommand(兼容无权限场景)
+      const copyText = (text) => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          return navigator.clipboard.writeText(text).catch(() => {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand("copy"); } catch { /* ignore */ }
+            document.body.removeChild(ta);
+          });
+        }
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch { /* ignore */ }
+        document.body.removeChild(ta);
+        return Promise.resolve();
+      };
+      // 显示 toast 提示,1.5s 后消失
+      const showToast = (msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(null), 1500);
+      };
+
+      // 点击页面其他地方关闭详情卡片(卡片用 closest 标记,点击卡片内部不关闭)
+      React.useEffect(() => {
+        if (!pop) return;
+        const onDocClick = (e) => {
+          const t = e.target;
+          if (wrapRef.current && wrapRef.current.contains(t)) return;
+          if (t && t.closest && t.closest(".ocgo-detail")) return;
+          setPop(null);
+        };
+        document.addEventListener("click", onDocClick, true);
+        return () => document.removeEventListener("click", onDocClick, true);
+      }, [pop]);
+
+      const load = React.useCallback(() => {
+        if (!loadedRef.current) setLoading(true);
+        // live=<sessionId>:本次会话实时通道(Host 只重读该会话文件,跳过 5 分钟缓存)
+        fetch(API + (sessionId ? "?live=" + encodeURIComponent(sessionId) : ""), { headers: { Accept: "application/json" } })
+          .then((res) => res.json())
+          .then((res) => {
+            loadedRef.current = true;
+            sharedData = res || null;
+            sharedAt = Date.now();
+            setData(res || null);
+            setLastUpdated(Date.now());
+            setLoading(false);
+            // provider 切换检测:变化时 toast 提示(首次加载不提示)
+            const ap = res && res.stats && res.stats.activeProvider;
+            const prev = prevProviderRef.current;
+            if (ap && prev && ap !== prev) {
+              const label = ap === "opencode-go" ? "OpenCode Go" : ap;
+              showToast("已切换到提供方：" + label);
+            }
+            prevProviderRef.current = ap || null;
+          })
+          .catch((e) => { loadedRef.current = true; setData({ ok: false, error: String((e && e.message) || e) }); setLoading(false); });
+      }, [sessionId]);
+      React.useEffect(() => { load(); }, [load]);
+      // 30s 自动刷新(无感:不闪 loading)
+      React.useEffect(() => { const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+      // 弹出动画:pop 变化时先隐藏,下一帧过渡到显示(必须无条件调用,保持 hooks 顺序稳定)
+      React.useEffect(() => {
+        if (!pop) return;
+        setShow(false);
+        const raf = requestAnimationFrame(() => requestAnimationFrame(() => setShow(true)));
+        return () => cancelAnimationFrame(raf);
+      }, [pop]);
+
+      if (!data || loading) {
+        return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 10, color: "#000000", whiteSpace: "nowrap" } },
+          React.createElement("span", null, "OpenCode Go …"));
+      }
+      if (!data.ok) {
+        return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 10, whiteSpace: "nowrap" } },
+          React.createElement("span", { style: { color: "#000000", fontWeight: 400 } }, "GO:不可用"),
+          React.createElement("span", { style: { color: "#555555" } }, String(data.error || "err")),
+          React.createElement("button", { onClick: load, style: { border: "1px solid #b0b0b0)", background: "transparent", color: "inherit", borderRadius: 6, padding: "2px 8px", fontSize: 10, cursor: "pointer" } }, "重试"));
+      }
+
+      const q = data.quota || {};
+      const rp = pctOf(q.rolling), wp = pctOf(q.weekly), mp = pctOf(q.monthly);
+      const s = data.stats || {};
+      const t = s.tokens || {};
+      const total = (t.input || 0) + (t.output || 0) + (t.reasoning || 0) + (t.cacheRead || 0) + (t.cacheWrite || 0);
+      // 范围联动:本次会话优先;按模型联动其次;都未选中显示全部。
+      // scope: 'all'=全部会话 / 'session'=本次会话 / 'recent'=最近对话(最近活跃会话)
+      const scoped = scope === "session" || scope === "recent"; // 是否限定了单个会话
+      const bsList = (s && s.bySession) || [];
+      // 会话 id 存在两种格式(裸 uuid / session- 前缀),双向匹配兜底
+      // currentSession:当前 GUI 会话(范围卡片"本次会话"行展示用,与当前 scope 无关)
+      const currentSession = sessionId ? (
+        bsList.find((b) => b.sessionId === sessionId)
+        || bsList.find((b) => b.sessionId === "session-" + sessionId)
+        || bsList.find((b) => b.sessionId === sessionId.replace(/^session-/, ""))
+      ) : null;
+      const bmList = (s && s.byModel) || [];
+      const sumTok = (tt) => (tt.input || 0) + (tt.output || 0) + (tt.reasoning || 0) + (tt.cacheRead || 0) + (tt.cacheWrite || 0);
+      // 当前提供方:当前会话最后事件 provider(实时跟随切换)→ 活跃 provider → 默认 GO
+      const actProv = (s && s.activeProvider) || null;
+      const badgeProvider = (currentSession && currentSession.lastProvider) || actProv || "opencode-go";
+      const badgeIsGo = badgeProvider === "opencode-go";
+      const providerShort = (p) => (p === "opencode-go" ? "GO" : (p === "deepseek-official" ? "DS" : (p && p !== "unknown" ? p.slice(0, 4).toUpperCase() : "API")));
+      const providerFull = (p) => (p === "opencode-go" ? "OpenCode Go" : (p && p !== "unknown" ? p : "未知"));
+      // 按当前提供方过滤的全局统计
+      const provStats = ((s && s.providers) || []).find((p) => p.provider === badgeProvider) || null;
+      const provTotal = provStats ? sumTok(provStats.tokens) : 0;
+      const provCost = provStats ? provStats.cost : 0;
+      const provUnknown = provStats ? (provStats.costUnknown || 0) : 0;
+      const bmListProv = (s && s.byModel) ? s.byModel.filter((m) => m.provider === badgeProvider) : [];
+      // 按当前提供方过滤某会话:返回该 provider 的 tokens/cost/requests/模型
+      const filterSession = (sess) => {
+        if (!sess) return null;
+        const p = (sess.byProvider || []).find((x) => x.provider === badgeProvider);
+        const models = (sess.byModel || []).filter((m) => m.provider === badgeProvider);
+        if (!p && !models.length) return null;
+        return {
+          ...sess,
+          tokens: p ? p.tokens : { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+          cost: p ? p.cost : 0,
+          requests: p ? p.requests : 0,
+          costUnknown: p ? (p.costUnknown || 0) : 0,
+          byModel: models,
+        };
+      };
+      // 范围选中的会话(provider 过滤后):session→当前会话;recent→lastTurn
+      const curSession = scope === "all" ? null : filterSession(
+        scope === "session"
+          ? currentSession
+          : (() => {
+              if (!currentSession || !currentSession.lastTurn) return currentSession || null;
+              return { ...currentSession, tokens: currentSession.lastTurn.tokens, cost: currentSession.lastTurn.cost, requests: currentSession.lastTurn.requests, costUnknown: currentSession.lastTurn.costUnknown || 0, byProvider: currentSession.lastTurn.byProvider, byModel: currentSession.lastTurn.byModel };
+            })()
+      );
+      // 模型联动/明细:全部范围=套餐全量清单(用过的在前 + 未用过的 GO 模型);
+      // 限定会话用该会话(provider 过滤后)的模型
+      const pkgModels = ((s && s.models) || []); // GO 套餐完整模型清单(含未用过)
+      const modelList = scoped
+        ? ((curSession && curSession.byModel) || [])
+        : (() => {
+            const used = bmListProv.slice();
+            const usedNames = new Set(used.map((m) => m.model));
+            pkgModels.forEach((pm) => { if (!usedNames.has(pm.model)) used.push(pm); });
+            return used;
+          })();
+      const selModel = modelSel ? modelList.find((m) => m.model === modelSel) : null;
+      // 当前范围+provider 口径下的总量/花费
+      const scopeTotal = scoped ? (curSession ? sumTok(curSession.tokens) : 0) : provTotal;
+      const scopeCost = scoped ? (curSession ? curSession.cost : 0) : provCost;
+      const scopeUnknown = scoped ? ((curSession && curSession.costUnknown) || 0) : provUnknown;
+      // 范围+模型双层联动
+      const shownTotal = scoped
+        ? (curSession ? (selModel ? sumTok(selModel.tokens) : scopeTotal) : 0)
+        : (selModel ? sumTok(selModel.tokens) : provTotal);
+      const shownCost = scoped
+        ? (curSession ? (selModel ? selModel.cost : scopeCost) : 0)
+        : (selModel ? selModel.cost : provCost);
+      // 范围中文标签(状态条/卡片标注共用)
+      const scopeLabel = scope === "session" ? "本次会话" : (scope === "recent" ? "最近对话" : "全部");
+
+      // 常驻条:GO 徽标 + 三个配额区块(标签在前,圆环在后) + token 区块 + 金额区块
+      // 关键布局全部内联样式(不依赖 CSS 类注入,保证 flex 单行不换行);区块间两个空格
+      const segBox = { display: "inline-flex", alignItems: "center", gap: 3, cursor: "pointer", padding: "2px 5px", borderRadius: 6, whiteSpace: "nowrap" };
+      const sepBox = { width: 5, flex: "none" }; // 区块间两个空格宽度的分隔(缩短一半)
+      const seg = (key, children) =>
+        React.createElement("span", {
+          style: segBox,
+          onClick: (e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setPop(pop && pop.key === key ? null : { key, rect: { left: r.left, top: r.top, width: r.width, height: r.height } });
+          },
+        }, children);
+
+      const bar = React.createElement("span", { ref: wrapRef, style: { display: "inline-flex", alignItems: "center", gap: 0, whiteSpace: "nowrap", fontSize: 10, color: "#000000" } },
+        (() => {
+          // 徽标:显示当前提供方简称(选中模型 → 该模型 provider;否则当前活跃 provider)
+          const badgeText = providerShort(badgeProvider) + ":";
+          const badgeColor = badgeIsGo ? "#000000" : "#000000";
+          const badgeBg = badgeIsGo ? "rgba(128,128,128,.16)" : "rgba(128,128,128,.16)";
+          return React.createElement("span", {
+            title: "当前提供方：" + providerFull(badgeProvider) + (badgeIsGo ? "" : "（非 OpenCode Go）"),
+            style: { fontWeight: 400, fontSize: 10, padding: "1px 6px", borderRadius: 4, color: badgeColor, background: badgeBg, flex: "none", cursor: "pointer" },
+            onClick: (e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setPop(pop && pop.key === "account" ? null : { key: "account", rect: { left: r.left, top: r.top, width: r.width, height: r.height } });
+            },
+          }, badgeText);
+        })(),
+        React.createElement("span", { style: sepBox }),
+        seg("quota-rolling", [
+          React.createElement("span", { key: "l", style: { color: "rgba(128,128,128,.8)" } }, "滚动："),
+          React.createElement(Ring, { key: "r", percent: rp, color: ringColor(rp) }),
+        ]),
+        React.createElement("span", { style: sepBox }),
+        seg("quota-weekly", [
+          React.createElement("span", { key: "l", style: { color: "rgba(128,128,128,.8)" } }, "周："),
+          React.createElement(Ring, { key: "r", percent: wp, color: ringColor(wp) }),
+        ]),
+        React.createElement("span", { style: sepBox }),
+        seg("quota-monthly", [
+          React.createElement("span", { key: "l", style: { color: "rgba(128,128,128,.8)" } }, "月："),
+          React.createElement(Ring, { key: "r", percent: mp, color: ringColor(mp) }),
+        ]),
+        React.createElement("span", { style: sepBox }),
+        seg("scope", [
+          React.createElement("span", { key: "l", style: { color: "rgba(128,128,128,.8)" } }, "范围："),
+          React.createElement("span", { key: "b", style: { fontWeight: 400, color: "#000000", fontVariantNumeric: "tabular-nums" } }, scopeLabel),
+        ]),
+        React.createElement("span", { style: sepBox }),
+        seg("model", [
+          React.createElement("span", { key: "l", style: { color: "rgba(128,128,128,.8)" } }, "模型："),
+          React.createElement("span", { key: "b", style: { fontWeight: 400, color: "#000000", fontVariantNumeric: "tabular-nums" } }, modelSel || "全部"),
+        ]),
+        React.createElement("span", { style: sepBox }),
+        seg("token", [
+          React.createElement("span", { key: "l", style: { color: "rgba(128,128,128,.8)" } }, "token："),
+          React.createElement("span", { key: "b", style: { fontWeight: 400, color: "#000000", fontVariantNumeric: "tabular-nums" } }, fmtInt(shownTotal)),
+        ]),
+        React.createElement("span", { style: sepBox }),
+        seg("money", [
+          React.createElement("span", { key: "l", style: { color: "rgba(128,128,128,.8)" } }, "花费："),
+          React.createElement("span", { key: "b", style: { fontWeight: 400, color: "#000000", fontVariantNumeric: "tabular-nums" } }, fmtUsd(shownCost)),
+        ]));
+
+      if (!pop) return bar;
+
+      // 卡片定位:被点区块正上方,水平居中;箭头指向区块中心
+      // token/花费卡片更窄(内容紧凑),配额卡片 300px
+      const rect = pop.rect || { left: 0, top: 0, width: 100, height: 20 };
+      const cardW = pop.key === "token" ? 250 : (pop.key === "money" ? 200 : 300);
+      const cardLeft = Math.max(8, Math.min(rect.left + rect.width / 2 - cardW / 2, window.innerWidth - cardW - 8));
+      const cardBottom = window.innerHeight - rect.top + 8;
+      const arrowLeft = rect.left + rect.width / 2 - cardLeft; // 箭头相对卡片左边缘
+
+      // 卡片公共样式(全内联,不依赖 CSS 注入)
+      const cardBase = {
+        position: "fixed",
+        left: cardLeft,
+        bottom: cardBottom,
+        width: cardW,
+        maxWidth: "90vw",
+        background: "#ffffff",
+        border: "1px solid #b0b0b0)",
+        borderRadius: 12,
+        boxShadow: "0 4px 16px rgba(0,0,0,.18)",
+        padding: "12px 14px",
+        fontSize: 11,
+        color: "#000000",
+        zIndex: 9999,
+        opacity: show ? 1 : 0,
+        transform: show ? "none" : "translateY(10px) scale(.94)",
+        transition: "opacity .18s cubic-bezier(.2,.9,.3,1.15), transform .18s cubic-bezier(.2,.9,.3,1.15)",
+        transformOrigin: "center bottom",
+        boxSizing: "border-box",
+        maxHeight: "70vh",
+        overflowY: "auto",
+      };
+      const rowStyle = { display: "flex", justifyContent: "space-between", gap: 8, padding: "2px 0" };
+      const bStyle = { fontWeight: 400, color: "#000000", fontVariantNumeric: "tabular-nums" };
+      /*
+       * 按钮：扁平化。
+       * 原来是一圈 1px 边框 + 6px 圆角，看起来像"胶囊"。
+       * 改成纯文字按钮（无边框、无圆角、无底色），只靠 hover 时的一点灰底提示可点。
+       * 那条 border 之前还有个多余的右括号 —— 浏览器直接忽略了整条声明，
+       * 所以按钮其实一直没有边框，只是没人注意。
+       */
+      const btnStyle = { border: "none", background: "transparent", color: "#000000", borderRadius: 0, padding: "3px 6px", fontSize: 11, cursor: "pointer", textDecoration: "none" };
+      const h4Style = { margin: "0 0 8px", fontSize: 11, fontWeight: 400, color: "#000000" };
+      const barStyle = { height: 5, borderRadius: 3, background: "rgba(128,128,128,.2)", overflow: "hidden", margin: "2px 0 6px" };
+      const footStyle = { fontSize: 10, opacity: .55, marginTop: 6 };
+
+      const popKey = pop.key;
+      let content = null;
+      if (popKey === "model") {
+        // 模型选择卡片:全部范围=套餐全量清单(用过的+未用过的 GO 模型);限定范围只列该会话的
+        const modelRow = (label, m) => {
+          // 未用过的套餐模型:pkgModels 项(有 in/out/cr/cw/used,无 tokens/cost/requests)
+          const unused = m && typeof m.requests !== "number";
+          const mt = (!unused && m) ? (m.tokens || {}) : (scoped ? ((curSession && curSession.tokens) || {}) : ((provStats && provStats.tokens) || {}));
+          const mTotal = sumTok(mt);
+          const mCost = (!unused && m) ? m.cost : scopeCost;
+          const active = (m ? m.model : null) === modelSel;
+          return React.createElement("div", {
+            key: label,
+            style: Object.assign({ padding: "4px 6px", borderRadius: 6, cursor: "pointer" }, active ? { background: "rgba(128,128,128,.16)" } : {}),
+            onClick: (e) => { e.stopPropagation(); setModelSel(m ? m.model : null); setPop(null); },
+          },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+              React.createElement("span", { style: { fontWeight: 400, color: "#000000", maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, label + (active ? " ✓" : "")),
+              React.createElement("span", { style: bStyle, color: unused ? "#555555" : undefined }, unused ? "未使用" : "定价未知")),
+            React.createElement("div", { style: { fontSize: 10, opacity: .7, paddingTop: 1 } },
+              unused ? ("定价 $" + m.in + "/" + m.out + "/" + m.cr + " 每百万") : ("token " + fmtCompact(mTotal))));
+        };
+        const rows = [modelRow("全部（合计）", null)];
+        modelList.forEach((m) => rows.push(modelRow(m.model + (m.provider ? " · " + providerShort(m.provider) : ""), m)));
+        content = React.createElement(React.Fragment, null,
+          React.createElement("div", { style: h4Style }, "选择模型" + (scoped ? " · " + scopeLabel : (badgeIsGo ? "" : " · " + providerShort(badgeProvider)))),
+          rows,
+          modelList.length ? React.createElement("div", { style: footStyle }, "选择后状态条 token/花费联动显示该模型；未使用的显示定价") : React.createElement("div", { style: footStyle }, "暂无模型用量"),
+          React.createElement("div", { style: Object.assign({}, rowStyle, { marginTop: 6 }) },
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); setPop(null); } }, "收起")));
+      } else if (popKey === "scope") {
+        // 范围选择卡片:全部会话 / 本次会话 / 最近对话;选择后状态条 token/花费联动显示
+        const scopeVal = (key) => {
+          if (key === "session") return currentSession ? fmtInt(sumTok(currentSession.tokens)) + " · " + fmtUsd(currentSession.cost) : "暂无记录";
+          if (key === "recent") {
+            const lt = currentSession && currentSession.lastTurn;
+            return lt ? fmtInt(sumTok(lt.tokens)) + " · " + fmtUsd(lt.cost) : "暂无记录";
+          }
+          return fmtInt(total) + " · " + fmtUsd(s.cost);
+        };
+        const scopeRow = (key, label, sub) => {
+          const active = scope === key;
+          return React.createElement("div", {
+            key: key,
+            style: Object.assign({ padding: "4px 6px", borderRadius: 6, cursor: "pointer" }, active ? { background: "rgba(128,128,128,.16)" } : {}),
+            onClick: (e) => {
+              e.stopPropagation();
+              setScope(key);
+              // 切到限定会话范围时:单模型自动选中该模型;多模型/无记录则回到"全部"
+              if (key !== "all") {
+                let target = null;
+                if (key === "session") {
+                  target = currentSession;
+                } else {
+                  target = (currentSession && currentSession.lastTurn) ? { ...currentSession, byModel: currentSession.lastTurn.byModel } : currentSession;
+                }
+                const ms = (target && target.byModel) || [];
+                if (ms.length === 1) setModelSel(ms[0].model);
+                else setModelSel(null);
+              }
+              setPop(null);
+            },
+          },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+              React.createElement("span", { style: { fontWeight: 400, color: "#000000" } }, label + (active ? " ✓" : "")),
+              React.createElement("span", { style: bStyle }, scopeVal(key))),
+            React.createElement("div", { style: { fontSize: 10, opacity: .7, paddingTop: 1 } }, sub));
+        };
+        content = React.createElement(React.Fragment, null,
+          React.createElement("div", { style: h4Style }, "统计范围"),
+          scopeRow("all", "全部", "所有 DSH 会话合计（opencode-go 流量）"),
+          scopeRow("session", "本次会话", currentSession ? "当前聊天会话累计的 token 与花费" : "当前会话暂无用量记录（显示 0）"),
+          scopeRow("recent", "最近对话", (currentSession && currentSession.lastTurn) ? "当前会话「最后一次任务」的执行消耗（含正在执行的任务）" : "当前会话暂无用量记录（显示 0）"),
+          React.createElement("div", { style: Object.assign({}, rowStyle, { marginTop: 6 }) },
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); setPop(null); } }, "收起")));
+      } else if (popKey === "quota-rolling" || popKey === "quota-weekly" || popKey === "quota-monthly") {
+        const winDefs = [
+          ["5 小时滚动", q.rolling, "#000000", popKey === "quota-rolling"],
+          ["每周", q.weekly, "#000000", popKey === "quota-weekly"],
+          ["每月", q.monthly, "#000000", popKey === "quota-monthly"],
+        ];
+        const rows = [];
+        winDefs.forEach(([label, w, color, active]) => {
+          const p = pctOf(w);
+          rows.push(React.createElement("div", { key: label, style: { marginBottom: 4, opacity: active ? 1 : 0.75 } },
+            React.createElement("div", { style: rowStyle },
+              React.createElement("span", null, label + (active ? " ▼" : "")),
+              React.createElement("span", { style: bStyle },
+                (p == null ? "-" : p + "% 已用") + " 重置 " + fmtReset(w && w.resetsAt))),
+            React.createElement("div", { style: barStyle },
+              React.createElement("i", { style: { display: "block", height: "100%", borderRadius: 3, width: (p == null ? 0 : Math.min(100, p)) + "%", background: color } }))));
+        });
+        content = React.createElement(React.Fragment, null,
+          React.createElement("div", { style: h4Style }, "套餐余量"),
+          rows,
+          React.createElement("div", { style: footStyle }, "官方配额 · 账户级（含其他设备/软件）"),
+          React.createElement("div", { style: Object.assign({}, rowStyle, { marginTop: 6 }) },
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); load(); } }, loading ? "刷新中…" : "刷新"),
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); setPop(null); } }, "收起")),
+          React.createElement("div", { style: footStyle }, "更新于 " + fmtClock(lastUpdated) + " · 自动刷新 30 秒"));
+      } else if (popKey === "token") {
+        // 口径跟随当前选择:选中模型 → 该模型;否则按范围(本次会话/全部)
+        const cardTok = selModel ? (selModel.tokens || {}) : (scoped ? (curSession ? curSession.tokens : {}) : ((provStats && provStats.tokens) || {}));
+        const cardTotal = selModel ? sumTok(selModel.tokens) : scopeTotal;
+        const cardTitle = selModel
+          ? "模型 " + selModel.model
+          : (scoped ? scopeLabel + "总消耗" : "总消耗 token");
+        const cardModels = selModel ? [selModel] : modelList;
+        const rows = [
+          ["输入：", fmtInt(cardTok.input)], ["输出：", fmtInt(cardTok.output)], ["推理：", fmtInt(cardTok.reasoning)],
+          ["缓存读：", fmtInt(cardTok.cacheRead)], ["缓存写：", fmtInt(cardTok.cacheWrite)],
+        ].map(([k, v]) =>
+          React.createElement("div", { key: k, style: { display: "flex", justifyContent: "space-between", gap: 16, padding: "1px 0" } },
+            React.createElement("span", null, k),
+            React.createElement("span", { style: bStyle }, v)));
+        // 按模型分组(token 明细;跟随模型选择与范围)
+        const modelRows = cardModels.map((m) => {
+          const mt = (m.tokens || {});
+          const mTotal = sumTok(mt);
+          return React.createElement("div", { key: m.model + (m.provider || ""), style: { padding: "3px 0", borderTop: "1px solid rgba(128,128,128,.12)" } },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+              React.createElement("span", { style: { fontWeight: 400, color: "#000000" } }, m.model + (m.provider ? " · " + providerShort(m.provider) : "")),
+              React.createElement("span", { style: bStyle }, fmtInt(mTotal))),
+            React.createElement("div", { style: { fontSize: 10, opacity: .7, paddingTop: 1 } },
+              "输入 " + fmtCompact(mt.input) + " · 输出 " + fmtCompact(mt.output) + " · 缓存 " + fmtCompact(mt.cacheRead)));
+        });
+        content = React.createElement(React.Fragment, null,
+          React.createElement("div", { style: h4Style }, cardTitle + "  " + fmtInt(cardTotal)),
+          rows,
+          cardModels.length ? React.createElement("div", { style: { fontSize: 10, fontWeight: 400, color: "#555555", marginTop: 6 } }, "按模型" + (selModel ? "（仅所选模型）" : (scoped ? "（" + scopeLabel + "）" : ""))) : null,
+          modelRows,
+          React.createElement("div", { style: footStyle }, "统计 DSH 会话全部 provider（当前识别：" + ((data.stats && data.stats.activeProvider && data.stats.activeProvider !== "opencode-go" ? data.stats.activeProvider : "OpenCode Go")) + "）· 范围：" + scopeLabel + (selModel ? " · 模型：" + selModel.model : "")),
+          React.createElement("div", { style: Object.assign({}, rowStyle, { marginTop: 6 }) },
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); load(); } }, loading ? "刷新中…" : "刷新"),
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); setPop(null); } }, "收起")),
+          React.createElement("div", { style: footStyle }, "更新于 " + fmtClock(lastUpdated) + " · 自动刷新 30 秒"));
+      } else if (popKey === "account") {
+        // 账户卡片:API key 无用户身份信息,显示套餐/配额概览 + key 掩码 + 复制
+        // + 当前识别到的 provider(切换套餐/大模型后实时反映)
+        const winRows = [
+          ["5 小时滚动", rp], ["每周", wp], ["每月", mp],
+        ].map(([label, p]) =>
+          React.createElement("div", { key: label, style: rowStyle },
+            React.createElement("span", null, label + "："),
+            React.createElement("span", { style: bStyle }, p == null ? "-" : p + "%")));
+        const acct = (data && data.account) || {};
+        const keyMask = acct.keyMask || "sk-…";
+        const copyKey = () => {
+          fetch("/ocgo-lite/key", { headers: { Accept: "application/json" } })
+            .then((r) => r.json())
+            .then((res) => {
+              if (res && res.ok && res.key) {
+                return copyText(res.key).then(() => {
+                  setCopied(true);
+                  showToast("API Key 已复制到剪贴板 ✓");
+                  setTimeout(() => setCopied(false), 1500);
+                });
+              }
+              showToast("复制失败：未获取到 Key");
+            })
+            .catch(() => showToast("复制失败"));
+        };
+        const providers = ((data.stats && data.stats.providers) || []);
+        const ap = (data.stats && data.stats.activeProvider) || null;
+        const provName = (p) => (p === "opencode-go" ? "OpenCode Go" : (p && p !== "unknown" ? p : "其他"));
+        const provRows = providers.length > 1 ? providers.map((p) =>
+          React.createElement("div", { key: p.provider, style: Object.assign({}, rowStyle, { fontSize: 10 }) },
+            React.createElement("span", { style: { color: p.provider === ap ? "#000000" : "inherit", fontWeight: p.provider === ap ? 700 : 400 } }, provName(p.provider) + (p.provider === ap ? " ◀" : "")),
+            React.createElement("span", { style: bStyle }, fmtUsd(p.cost)) + " + " + p.requests + " 次")) : null;
+        content = React.createElement(React.Fragment, null,
+          React.createElement("div", { style: h4Style }, "OpenCode Go 账户" + (ap && ap !== "opencode-go" ? "（当前：" + provName(ap) + "）" : "")),
+          React.createElement("div", { style: rowStyle }, React.createElement("span", null, "登录状态："),
+            React.createElement("span", { style: bStyle }, data && data.ok ? "已登录 ✓" : "未登录")),
+          React.createElement("div", { style: rowStyle }, React.createElement("span", null, "套餐："),
+            React.createElement("span", { style: bStyle }, "Go 订阅")),
+          winRows,
+          React.createElement("div", { style: rowStyle }, React.createElement("span", null, "当前提供方："),
+            React.createElement("span", { style: bStyle }, provName(ap))),
+          provRows,
+          React.createElement("div", { style: rowStyle }, React.createElement("span", null, "API Key："),
+            React.createElement("span", { style: { fontVariantNumeric: "tabular-nums", color: "#000000" } }, keyMask)),
+          React.createElement("div", { style: Object.assign({}, rowStyle, { marginTop: 4 }) },
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); copyKey(); } }, copied ? "已复制 ✓" : "复制 API Key")),
+          React.createElement("div", { style: footStyle }, "配额为 OpenCode Go 账户级；token/花费按当前使用的所有 provider 实时统计"),
+          React.createElement("div", { style: Object.assign({}, rowStyle, { marginTop: 6 }) },
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); load(); } }, loading ? "刷新中…" : "刷新"),
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); setPop(null); } }, "收起")),
+          React.createElement("div", { style: footStyle }, "更新于 " + fmtClock(lastUpdated) + " · 自动刷新 30 秒"));
+      } else if (popKey === "money") {
+        // 按模型花费排行(降序)+ 占比条;范围=本次会话时只列本次会话的模型
+        // 口径跟随当前选择:选中模型 → 该模型;否则按范围(本次会话/全部)
+        const bm = selModel ? [selModel] : modelList;
+        const cardCost = selModel ? selModel.cost : scopeCost;
+        const cardUnknown = selModel ? (selModel.costUnknown || 0) : (scoped ? ((curSession && curSession.costUnknown) || 0) : provUnknown);
+        const cardSessions = selModel ? selModel.requests : (scoped ? (curSession ? 1 : 0) : ((provStats && provStats.requests) || "-"));
+        const maxCost = bm.length ? Math.max.apply(null, bm.map((m) => m.cost)) : 0;
+        const fmtPrice = (p) => (p ? "$" + p.in + "/" + p.out + "/" + p.cr + " 每百万" : "定价未知");
+        const modelCostRows = bm.map((m) =>
+          React.createElement("div", { key: m.model + (m.provider || ""), style: { padding: "2px 0" } },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+              React.createElement("span", { style: { maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, m.model + (m.provider ? " · " + providerShort(m.provider) : "")),
+              React.createElement("span", { style: bStyle }, (m.price ? fmtUsd(m.cost) : "定价未知"))),
+            React.createElement("div", { style: { height: 4, borderRadius: 2, background: "rgba(128,128,128,.18)", overflow: "hidden", marginTop: 2 } },
+              React.createElement("div", { style: { height: "100%", width: maxCost > 0 ? Math.max(2, (m.cost / maxCost) * 100) + "%" : "0%", background: "#000000", borderRadius: 2 } })),
+            React.createElement("div", { style: { fontSize: 9, opacity: .6, paddingTop: 1 } }, fmtPrice(m.price))));
+        content = React.createElement(React.Fragment, null,
+          React.createElement("div", { style: h4Style }, "消耗金额" + (selModel ? " · " + selModel.model : (scoped ? " · " + scopeLabel : ""))),
+          React.createElement("div", { style: rowStyle }, React.createElement("span", null, "累计："),
+            React.createElement("span", { style: bStyle }, fmtUsd(cardCost) + (cardUnknown > 0 ? " 美元（" + cardUnknown + " 次定价未知）" : " 美元"))),
+          React.createElement("div", { style: rowStyle }, React.createElement("span", null, "会话数："),
+            React.createElement("span", { style: bStyle }, cardSessions)),
+          bm.length ? React.createElement("div", { style: { fontSize: 10, fontWeight: 400, color: "#555555", marginTop: 6 } }, "按模型（花费）" + (selModel ? "（仅所选模型）" : (scoped ? " · " + scopeLabel : ""))) : null,
+          modelCostRows,
+          React.createElement("div", { style: footStyle }, "统计 DSH 会话全部 provider · 按官方定价估算（无官方定价的模型金额未计入，显示\"定价未知\"）· 范围：" + scopeLabel + (selModel ? " · 模型：" + selModel.model : "")),
+          React.createElement("div", { style: footStyle }, "定价更新于 " + fmtDT(data && data.meta && data.meta.pricingUpdatedAt)),
+          React.createElement("div", { style: Object.assign({}, rowStyle, { marginTop: 6 }) },
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); load(); } }, loading ? "刷新中…" : "刷新"),
+            React.createElement("button", { className: "btn", style: btnStyle, onClick: (e) => { e.stopPropagation(); setPop(null); } }, "收起")),
+          React.createElement("div", { style: footStyle }, "更新于 " + fmtClock(lastUpdated) + " · 自动刷新 30 秒"));
+      }
+
+      // 箭头(内联三角,指向被点区块)
+      const arrow = React.createElement("div", {
+        style: {
+          position: "absolute",
+          bottom: -7,
+          left: arrowLeft - 7,
+          width: 0, height: 0,
+          borderLeft: "7px solid transparent",
+          borderRight: "7px solid transparent",
+          borderTop: "7px solid #ffffff",
+          filter: "none",
+          pointerEvents: "none",
+        },
+      });
+
+      const card = React.createElement("div", { className: "ocgo-detail", style: cardBase, onClick: (e) => e.stopPropagation() },
+        content,
+        arrow);
+
+      // 复制成功 toast(固定定位顶部居中,渐入渐出)
+      let toastEl = null;
+      if (toast) {
+        toastEl = ReactDOM.createPortal(
+          React.createElement("div", {
+            style: {
+              position: "fixed",
+              top: 24,
+              left: "50%",
+              transform: "translateX(-50%)",
+              background: "rgba(40,40,40,.95)",
+              color: "#fff",
+              padding: "8px 18px",
+              borderRadius: 8,
+              fontSize: 12,
+              fontWeight: 400,
+              boxShadow: "0 2px 10px rgba(0,0,0,.16)",
+              zIndex: 100000,
+              pointerEvents: "none",
+            },
+          }, toast),
+          document.body);
+      }
+
+      // Portal 到 body:彻底脱离 dock 容器的 transform/overflow 影响
+      return React.createElement(React.Fragment, null,
+        bar,
+        ReactDOM.createPortal(card, document.body),
+        toastEl);
+    }
+
+    function apply(ctx) {
+      // 注入样式:闭包持有自己的 style 引用,热重载时只清理自己创建的实例,
+      // 绝不再按固定 id 查找(旧版按 id 删除会把新注入的 style 也删掉,导致 CSS 类全部失效)
+      try {
+        const style = document.createElement("style");
+        style.textContent = CSS;
+        document.head.appendChild(style);
+        ctx.effect(() => { try { style.remove(); } catch { /* ignore */ } }, "ocgo-lite: css");
+      } catch { /* ignore */ }
+
+      ctx.effect(() => ctx.slots.inject("conversation.composer.dock", () =>
+        ctx.slots.register({
+          name: "conversation.composer.dock",
+          id: "ocgo-lite",
+          order: 1,
+          label: () => "OpenCode Go 用量",
+        }, (props) => React.createElement(OcgoLite, { sessionId: props && props.sessionId }))
+      ), "ocgo-lite: dock");
+    }
+
+    exports.apply = apply;
+    exports.inject = inject;
+    return module.exports;
+  }
+});
