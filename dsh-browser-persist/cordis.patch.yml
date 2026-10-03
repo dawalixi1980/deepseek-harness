@@ -1,5 +1,0 @@
-# Bundle layer contributed by dsh-browser-persist.
-# Installed automatically when a profile lists this bundle.
-- insert:
-    - id: browser-persist
-      name: dsh-browser-persist
