@@ -1,0 +1,296 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { PluginConfigStore } from '../../../src/channels/feishu/plugin-config-store.mjs';
+import { assertRestrictiveMode } from '../../support/filesystem.mjs';
+
+test('panel settings preserve old config on load and persist independent booleans per bot', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-panels-'));
+  const path = join(dir, 'config.json');
+  const bots = ['one', 'two'].map((id) => ({ id, appId: `cli_${id}`, secretRef: `SECRET_${id}`, ownerOpenIds: ['ou_owner'], stepPush: true, stepPushMode: 'live_cot' }));
+  const old = JSON.stringify({ version: 2, bots });
+  await writeFile(path, old);
+  const store = await new PluginConfigStore(path).load();
+  assert.equal(await readFile(path, 'utf8'), old, 'reading old config must not rewrite it');
+  assert.deepEqual(store.getBot('one').stepCardPanels, { thinkingExpanded: false, toolsExpanded: true });
+  for (const thinkingExpanded of [false, true]) {
+    for (const toolsExpanded of [false, true]) {
+      const panels = { thinkingExpanded, toolsExpanded };
+      await store.saveBot({ ...store.getBot('one'), stepCardPanels: panels });
+      const reloaded = await new PluginConfigStore(path).load();
+      assert.deepEqual(reloaded.getBot('one').stepCardPanels, panels);
+      assert.deepEqual(reloaded.getBot('two').stepCardPanels, { thinkingExpanded: false, toolsExpanded: true });
+      assert.equal(reloaded.getBot('one').stepPushMode, 'live_cot');
+      assert.equal(reloaded.getBot('one').stepPush, true);
+    }
+  }
+  await store.saveBot({ ...store.getBot('one'), stepCardPanels: { thinkingExpanded: 'true', toolsExpanded: null } });
+  assert.deepEqual(store.getBot('one').stepCardPanels, { thinkingExpanded: false, toolsExpanded: true });
+  await store.saveBot({ ...store.getBot('one'), stepCardPanels: { toolsExpanded: false } });
+  assert.deepEqual(store.getBot('one').stepCardPanels, { thinkingExpanded: false, toolsExpanded: false });
+});
+
+test('PluginConfigStore persists non-secret onboarding facts', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-'));
+  const path = join(dir, 'nested', 'config.json');
+  const store = await new PluginConfigStore(path).load();
+  assert.equal(store.get(), null);
+
+  await store.save({
+    appId: 'cli_test',
+    ownerOpenId: 'ou_owner',
+    domain: 'feishu',
+    botName: '北汇星河助手',
+    appSecret: 'must-not-be-written',
+  });
+
+  const raw = await readFile(path, 'utf8');
+  assert.doesNotMatch(raw, /must-not-be-written/);
+  await assertRestrictiveMode(path, 0o600);
+  assert.equal((await new PluginConfigStore(path).load()).get().appId, 'cli_test');
+  assert.equal(store.get().groupResponseMode, 'mention');
+  assert.equal(store.get().groupMessagePermissionGranted, false);
+
+  await store.save({
+    ...store.get(),
+    groupResponseMode: 'all',
+    groupMessagePermissionGranted: true,
+    mentionTopicReply: true,
+  });
+  const reloaded = (await new PluginConfigStore(path).load()).get();
+  assert.equal(reloaded.groupResponseMode, 'all');
+  assert.equal(reloaded.groupMessagePermissionGranted, true);
+  assert.equal(reloaded.mentionTopicReply, true);
+
+  await store.clear();
+  assert.equal(store.get(), null);
+});
+
+test('PluginConfigStore defaults mentionTopicReply on and only a literal false turns it off', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-topic-'));
+  const path = join(dir, 'config.json');
+  const store = await new PluginConfigStore(path).load();
+
+  await store.save({
+    appId: 'cli_topic',
+    ownerOpenId: 'ou_owner',
+    domain: 'feishu',
+    mentionTopicReply: 'no', // anything but a literal false keeps the default
+  });
+  assert.equal(store.get().mentionTopicReply, true);
+
+  await store.save({ ...store.get(), mentionTopicReply: false });
+  assert.equal((await new PluginConfigStore(path).load()).get().mentionTopicReply, false);
+
+  await store.clear();
+});
+
+test('PluginConfigStore defaults stepPush off and only persists a literal true', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-step-push-'));
+  const path = join(dir, 'config.json');
+  const store = await new PluginConfigStore(path).load();
+
+  await store.save({
+    appId: 'cli_step_push',
+    ownerOpenId: 'ou_owner',
+    domain: 'feishu',
+    stepPush: 'yes', // must not be accepted as true
+  });
+  assert.equal(store.get().stepPush, false);
+
+  await store.save({ ...store.get(), stepPush: true });
+  assert.equal((await new PluginConfigStore(path).load()).get().stepPush, true);
+
+  await store.clear();
+});
+
+test('PluginConfigStore defaults the slash panel to the manifest and normalizes damaged values', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-slash-panel-'));
+  const path = join(dir, 'config.json');
+  const store = await new PluginConfigStore(path).load();
+
+  assert.deepEqual(store.get()?.slashPanel, undefined);
+  await store.save({
+    appId: 'cli_slash_panel',
+    ownerOpenId: 'ou_owner',
+    domain: 'feishu',
+    slashPanel: { mode: 'custom', order: ['/new', 'stop', 'new', 'nope'] },
+  });
+  // Unknown names and duplicates never reach the panel; a leading slash is how
+  // users write a command, not how it is stored.
+  assert.deepEqual(store.get().slashPanel, { mode: 'custom', order: ['new', 'stop'] });
+  assert.deepEqual(
+    (await new PluginConfigStore(path).load()).get().slashPanel,
+    { mode: 'custom', order: ['new', 'stop'] },
+  );
+
+  await store.save({ ...store.get(), slashPanel: { mode: 'default', order: ['new'] } });
+  assert.deepEqual(store.get().slashPanel, { mode: 'default', order: [] });
+
+  await store.save({ ...store.get(), slashPanel: 'custom' });
+  assert.deepEqual(store.get().slashPanel, { mode: 'default', order: [] });
+
+  await store.clear();
+});
+
+test('PluginConfigStore defaults stepPushMode to post and normalizes unknown values', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-step-push-mode-'));
+  const path = join(dir, 'config.json');
+  const store = await new PluginConfigStore(path).load();
+
+  await store.save({
+    appId: 'cli_step_push_mode',
+    ownerOpenId: 'ou_owner',
+    domain: 'feishu',
+    stepPushMode: 'bubble', // unknown values preserve the legacy post presentation
+  });
+  assert.equal(store.get().stepPushMode, 'post');
+
+  await store.save({ ...store.get(), stepPushMode: 'streaming_card' });
+  assert.equal((await new PluginConfigStore(path).load()).get().stepPushMode, 'streaming_card');
+
+  await store.save({ ...store.get(), stepPushMode: 'live_cot' });
+  assert.equal((await new PluginConfigStore(path).load()).get().stepPushMode, 'live_cot');
+
+  await store.clear();
+});
+
+test('PluginConfigStore stays unconfigured after a failed write and can retry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-retry-'));
+  const blockedParent = join(dir, 'blocked');
+  const path = join(blockedParent, 'config.json');
+  const store = await new PluginConfigStore(path).load();
+  await writeFile(blockedParent, 'not a directory');
+  const value = { appId: 'cli_retry', ownerOpenId: 'ou_retry', domain: 'feishu' };
+
+  await assert.rejects(store.save(value));
+  assert.equal(store.get(), null);
+
+  await unlink(blockedParent);
+  await mkdir(blockedParent);
+  await store.save(value);
+  assert.equal(store.get().appId, 'cli_retry');
+});
+
+test('PluginConfigStore migrates a v1 bot atomically without moving its credential', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-migrate-'));
+  const path = join(dir, 'config.json');
+  await writeFile(path, JSON.stringify({
+    version: 1,
+    appId: 'cli_legacy',
+    ownerOpenId: 'ou_legacy',
+    domain: 'feishu',
+    botName: '旧机器人',
+  }));
+
+  const store = await new PluginConfigStore(path).load();
+  const migrated = JSON.parse(await readFile(path, 'utf8'));
+
+  assert.equal(migrated.version, 2);
+  assert.equal(migrated.bots.length, 1);
+  assert.match(migrated.bots[0].id, /^bot_[a-f0-9]{24}$/);
+  assert.equal(migrated.bots[0].secretRef, 'DSH_FEISHU_APP_SECRET');
+  assert.deepEqual(migrated.bots[0].ownerOpenIds, ['ou_legacy']);
+  assert.equal(store.get().ownerOpenId, 'ou_legacy');
+  assert.equal(store.list()[0].appId, 'cli_legacy');
+  assert.equal(store.list()[0].groupResponseMode, 'mention');
+  assert.equal(store.list()[0].groupMessagePermissionGranted, false);
+});
+
+test('PluginConfigStore rejects an invalid or duplicate v2 document without dropping entries', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-invalid-v2-'));
+  const invalidPath = join(dir, 'invalid.json');
+  await writeFile(invalidPath, JSON.stringify({
+    version: 2,
+    bots: [
+      {
+        id: 'bot_good', appId: 'cli_good', secretRef: 'DSH_FEISHU_APP_SECRET_GOOD',
+        ownerOpenIds: ['ou_good'], domain: 'feishu',
+      },
+      { id: '../bad', appId: 'cli_bad', secretRef: 'not-a-credential-ref', ownerOpenIds: ['ou_bad'] },
+    ],
+  }));
+  await assert.rejects(new PluginConfigStore(invalidPath).load(), /invalid bot entry/);
+
+  const duplicatePath = join(dir, 'duplicate.json');
+  await writeFile(duplicatePath, JSON.stringify({
+    version: 2,
+    bots: [
+      {
+        id: 'bot_one', appId: 'cli_same', secretRef: 'DSH_FEISHU_APP_SECRET_ONE',
+        ownerOpenIds: ['ou_one'], domain: 'feishu',
+      },
+      {
+        id: 'bot_two', appId: 'cli_same', secretRef: 'DSH_FEISHU_APP_SECRET_TWO',
+        ownerOpenIds: ['ou_two'], domain: 'feishu',
+      },
+    ],
+  }));
+  await assert.rejects(new PluginConfigStore(duplicatePath).load(), /duplicate bot identities/);
+});
+
+test('PluginConfigStore preserves old step-push settings when loading missing modes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-legacy-modes-'));
+  const path = join(dir, 'config.json');
+  const cases = [
+    { stepPush: true }, { stepPush: false },
+    { stepPush: true, stepPushMode: 'post' },
+    { stepPush: true, stepPushMode: 'streaming_card' },
+    { stepPush: true, stepPushMode: 'live_cot' },
+  ];
+  await writeFile(path, JSON.stringify({ version: 2, bots: cases.map((settings, index) => ({
+    id: 'bot_legacy_' + index, appId: 'cli_legacy_' + index,
+    secretRef: 'DSH_LEGACY_' + index, ownerOpenIds: ['ou_owner'], ...settings,
+  })) }));
+  const store = await new PluginConfigStore(path).load();
+  for (const [index, settings] of cases.entries()) {
+    const saved = store.getBot('bot_legacy_' + index);
+    assert.equal(saved.stepPush, settings.stepPush);
+    assert.equal(saved.stepPushMode, settings.stepPushMode ?? 'post');
+    await store.saveBot(saved);
+  }
+  const reloaded = await new PluginConfigStore(path).load();
+  assert.deepEqual(reloaded.list(), store.list());
+  await store.clear();
+});
+
+test('PluginConfigStore normalizes per-bot voice config and stores only the credential reference', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-config-voice-'));
+  const path = join(dir, 'config.json');
+  const store = await new PluginConfigStore(path).load();
+
+  // 未配置的机器人语音为 null(与历史行为一致)
+  await store.save({
+    appId: 'cli_voice_off',
+    ownerOpenId: 'ou_owner',
+    domain: 'feishu',
+  });
+  assert.equal(store.get().voice, null);
+
+  await store.save({
+    ...store.get(),
+    voice: { enabled: true, secretRef: 'DASHSCOPE_API_KEY', ttsVoice: 'Cherry' },
+  });
+  const voice = store.get().voice;
+  assert.deepEqual(Object.keys(voice).sort(), [
+    'asrBaseUrl', 'asrModel', 'enabled', 'ffmpeg', 'secretRef', 'ttsModel', 'ttsVoice',
+  ]);
+  assert.equal(voice.enabled, true);
+  assert.equal(voice.secretRef, 'DASHSCOPE_API_KEY');
+  assert.equal(voice.asrModel, 'qwen3-asr-flash');
+  assert.equal(voice.ttsModel, 'qwen3-tts-flash');
+  assert.equal(voice.ttsVoice, 'Cherry');
+  assert.equal(voice.ffmpeg, null);
+  assert.equal((await new PluginConfigStore(path).load()).get().voice.ttsVoice, 'Cherry');
+
+  // 关闭或残缺的语音配置归一化为 null,行为与未配置完全一致
+  await store.save({ ...store.get(), voice: { enabled: false, secretRef: 'DASHSCOPE_API_KEY' } });
+  assert.equal((await new PluginConfigStore(path).load()).get().voice, null);
+
+  await store.save({ ...store.get(), voice: { enabled: true, secretRef: 'BAD-KEY' } });
+  assert.equal((await new PluginConfigStore(path).load()).get().voice, null);
+
+  await store.clear();
+});
