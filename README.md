@@ -14,6 +14,7 @@
 | [`dsh-restart/`](dsh-restart/README.md) | **一键重启 DSH**：侧栏底部一个按钮，关掉应用并重新打开。因为 host 进程拿不到 `app.relaunch()`、也没有给第三方的重启 IPC，只能另起一个脱离进程组的帮手来杀进程并重新拉起可执行文件（用 `wscript` 当跳板）。 |
 | [`dsh-chat-background/`](dsh-chat-background/README.md) | 聊天背景插件：在 Web GUI 设置中选择本地图片作为聊天窗口背景。独立分发的 bundle，含预构建 `lib/` 和 `dsh.bundle` 补丁层，可通过 `dsh plugin add` 安装。 |
 | [`dsh-ogodingyue/`](dsh-ogodingyue/README.md) | **OpenCode Go 用量常驻条**（黑白配色版）：输入框下方常驻显示套餐余量（滚动 5 小时 / 周 / 月）与重置倒计时，并按模型统计 token 消耗与花费。数据源是官方 `https://opencode.ai/zen/go/v1/usage` + DSH 会话日志，零外部依赖。fork 自 `OK-wx/dsh-ocgo-lite`，**只改配色** —— 去掉全部品牌色改为纯灰阶、不跟主题、去掉字重与光晕。 |
+| [`dsh-im/`](dsh-im/README.md) | **把 IM 平台接到 DSH**：钉钉 / 飞书 / Lark / 微信 / 企业微信 / QQ / Slack / Telegram / Discord / WhatsApp / iMessage / Matrix 共 12 个渠道。在手机上给本机 DSH 下任务、读回复、回答选择题、**批准或拒绝工具执行**。每个机器人**独立**配工作区 / 模型 / 思考强度 / Agent Preset / 访问白名单，**同一渠道可接多个机器人**（各自扫码）。微信走腾讯官方 **iLink（ClawBot）** 协议。⚠️ **这是 [xmanrui/dsh-im](https://github.com/xmanrui/dsh-im) 的镜像**（MIT，上游约 1.8k★），**不会自动跟上游更新**。 |
 | `[lexiang/](lexiang/)` | 腾讯乐享官方 MCP 技能包（@lexiang/skills v1.1.2，MIT），6 个 skill：配置向导 / 搜索阅读 / 文档写入 / Block 编辑 / 文件上传 / 外部数据源导入。 |
 | [`.agents/skills/harnessmaker/`](.agents/skills/harnessmaker/SKILL.md) | 插件开发 skill：完整开发/分发/安装/验证框架，含实测踩坑（tarball vs git/link 安装、Web 白名单 `settings-not-exposed`、运行时验证清单）。 |
 
